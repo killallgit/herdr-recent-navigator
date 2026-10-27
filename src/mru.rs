@@ -1543,7 +1543,6 @@ mod tests {
         others: &'a HashMap<String, PaneOthers>,
         pane_ts: &'a HashMap<String, u64>,
         locator: &'a crate::models::PidLocator,
-        self_pane_id: Option<&'a str>,
     ) -> BuildOptions<'a> {
         BuildOptions {
             pane_ts,
@@ -1552,7 +1551,7 @@ mod tests {
             active_workspace_id: None,
             active_pane_id: None,
             active_tab_id: None,
-            self_pane_id,
+            self_pane_id: None,
             others,
             contents,
             locator,
@@ -1694,7 +1693,10 @@ mod tests {
         );
 
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, Some("pane-5"));
+        let opts = BuildOptions {
+            self_pane_id: Some("pane-5"),
+            ..content_opts(&contents, &others, &empty, &locator)
+        };
         let items = build_content_items(&nodes, &opts, "deployservice");
         assert_eq!(items.len(), 1);
         let item = &items[0];
@@ -1723,7 +1725,7 @@ mod tests {
             "deploy failed: connection refused\n".to_string(),
         );
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let opts = content_opts(&contents, &others, &empty, &locator);
         let items = build_content_items(&nodes, &opts, "deploy");
         let pane5 = items
             .iter()
@@ -1739,14 +1741,20 @@ mod tests {
 
         // No match → empty list; agent/content never searched.
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, Some("pane-5"));
+        let opts = BuildOptions {
+            self_pane_id: Some("pane-5"),
+            ..content_opts(&contents, &others, &empty, &locator)
+        };
         let items = build_content_items(&nodes, &opts, "zzz-no");
         assert!(items.is_empty());
 
         // No cached content for any pane → nothing to match.
         let locator = no_locator();
         let no_contents = HashMap::new();
-        let opts = content_opts(&no_contents, &others, &empty, &locator, Some("pane-5"));
+        let opts = BuildOptions {
+            self_pane_id: Some("pane-5"),
+            ..content_opts(&no_contents, &others, &empty, &locator)
+        };
         let items = build_content_items(&nodes, &opts, "deployservice");
         assert!(items.is_empty());
     }
@@ -1770,7 +1778,7 @@ mod tests {
             },
         );
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let opts = content_opts(&contents, &others, &empty, &locator);
         let items = build_content_items(&nodes, &opts, "deploy");
         assert_eq!(items.len(), 1);
         match &items[0] {
@@ -1795,7 +1803,7 @@ mod tests {
         );
         contents.insert("pane-5".to_string(), "term output deploy\n".to_string());
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let opts = content_opts(&contents, &others, &empty, &locator);
         let items = build_content_items(&nodes, &opts, "deploy");
         let pane5 = items
             .iter()
@@ -1844,7 +1852,7 @@ mod tests {
             },
         );
         let locator = no_locator();
-        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let opts = content_opts(&contents, &others, &empty, &locator);
         let items = build_content_items(&nodes, &opts, "token");
         assert_eq!(items.len(), 1);
         assert_eq!(
@@ -2475,7 +2483,7 @@ mod tests {
         let no_contents = HashMap::new();
         let no_ts = HashMap::new();
         let locator = no_locator();
-        let opts = content_opts(&no_contents, &others, &no_ts, &locator, None);
+        let opts = content_opts(&no_contents, &others, &no_ts, &locator);
         let records = build_other_items(&[&node], &opts);
         let ssh_record = records
             .iter()
