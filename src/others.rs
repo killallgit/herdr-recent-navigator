@@ -108,8 +108,20 @@ pub fn parse_ssh_target(cmd: &str) -> Option<String> {
 
 /// Common login shells by basename (an idle shell's foreground command).
 const SHELL_NAMES: &[&str] = &[
-    "zsh", "bash", "sh", "dash", "ksh", "tcsh", "fish", "csh", "ash", "nu", "elvish", "xonsh",
-    "pwsh", "powershell",
+    "zsh",
+    "bash",
+    "sh",
+    "dash",
+    "ksh",
+    "tcsh",
+    "fish",
+    "csh",
+    "ash",
+    "nu",
+    "elvish",
+    "xonsh",
+    "pwsh",
+    "powershell",
 ];
 
 /// Return true if the foreground command is (just) a login shell.
@@ -295,7 +307,10 @@ const EXCERPT_POST: usize = 80;
 /// Long regions are trimmed with ellipses.
 fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
     let line_start = content[..mid].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = content[mid..].find('\n').map(|i| mid + i).unwrap_or(content.len());
+    let line_end = content[mid..]
+        .find('\n')
+        .map(|i| mid + i)
+        .unwrap_or(content.len());
     let line = sanitize_line(&content[line_start..line_end]);
     // The sanitize step maps each char to a single char, so byte offsets in the
     // original line are still valid on the sanitized line.
@@ -309,8 +324,16 @@ fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
     if start_c > 0 {
         out.push('…');
     }
-    let start_b = line.char_indices().nth(start_c).map(|(i, _)| i).unwrap_or(line.len());
-    let end_b = line.char_indices().nth(end_c).map(|(i, _)| i).unwrap_or(line.len());
+    let start_b = line
+        .char_indices()
+        .nth(start_c)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    let end_b = line
+        .char_indices()
+        .nth(end_c)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
     out.push_str(&line[start_b..end_b]);
     if end_c < line_c {
         out.push('…');
@@ -443,23 +466,14 @@ mod tests {
 
     #[test]
     fn strips_sgr_and_csi() {
-        assert_eq!(
-            strip_ansi("\x1b[38;5;196mred\x1b[0m plain"),
-            "red plain"
-        );
+        assert_eq!(strip_ansi("\x1b[38;5;196mred\x1b[0m plain"), "red plain");
         assert_eq!(strip_ansi("\x1b[1mB\x1b[0m"), "B");
     }
 
     #[test]
     fn strips_osc_title_sequences() {
-        assert_eq!(
-            strip_ansi("\x1b]0;tmux title\x07text"),
-            "text"
-        );
-        assert_eq!(
-            strip_ansi("\x1b]633;prop=;row=1\x1b\\row"),
-            "row"
-        );
+        assert_eq!(strip_ansi("\x1b]0;tmux title\x07text"), "text");
+        assert_eq!(strip_ansi("\x1b]633;prop=;row=1\x1b\\row"), "row");
     }
 
     #[test]
@@ -469,7 +483,10 @@ mod tests {
 
     #[test]
     fn leaves_plain_text_unchanged() {
-        assert_eq!(strip_ansi("plain text with no escapes"), "plain text with no escapes");
+        assert_eq!(
+            strip_ansi("plain text with no escapes"),
+            "plain text with no escapes"
+        );
     }
 
     // ── content_excerpt ──
@@ -493,7 +510,10 @@ mod tests {
         // Match must sit near the LEFT edge so a narrow Detail column still shows it.
         let prefix = ex[..ex.find("NEEDLE").unwrap()].chars().count();
         let leading_marker = usize::from(ex.starts_with('…'));
-        assert!(prefix - leading_marker <= EXCERPT_PRE, "match buried at char {prefix}: {ex}");
+        assert!(
+            prefix - leading_marker <= EXCERPT_PRE,
+            "match buried at char {prefix}: {ex}"
+        );
         assert!(ex.chars().count() <= EXCERPT_PRE + 6 + EXCERPT_POST + 2);
     }
 
@@ -509,7 +529,10 @@ mod tests {
         let ex = content_excerpt(content, "thers").unwrap();
         let prefix = ex[..ex.find("thers").unwrap()].chars().count();
         let leading_marker = usize::from(ex.starts_with('…'));
-        assert!(prefix - leading_marker <= EXCERPT_PRE, "match buried at char {prefix}: {ex}");
+        assert!(
+            prefix - leading_marker <= EXCERPT_PRE,
+            "match buried at char {prefix}: {ex}"
+        );
     }
 
     #[test]
@@ -542,7 +565,10 @@ mod tests {
 
     #[test]
     fn parses_user_at_host() {
-        assert_eq!(parse_ssh_target("ssh lex@192.168.1.50"), Some("lex@192.168.1.50".into()));
+        assert_eq!(
+            parse_ssh_target("ssh lex@192.168.1.50"),
+            Some("lex@192.168.1.50".into())
+        );
     }
 
     #[test]
@@ -595,7 +621,10 @@ mod tests {
 
     #[test]
     fn mosh_is_ssh_family() {
-        assert_eq!(parse_ssh_target("mosh user@laptop.local"), Some("user@laptop.local".into()));
+        assert_eq!(
+            parse_ssh_target("mosh user@laptop.local"),
+            Some("user@laptop.local".into())
+        );
     }
 
     #[test]
