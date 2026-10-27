@@ -58,6 +58,16 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 <!-- END BEADS INTEGRATION -->
 
 
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in beads (`bd`). See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
 ## Build & Test
 
 _Add your build and test commands here_
@@ -74,4 +84,23 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+Follow the `killall-skills:follow-the-rules` skill when writing any code. Its rules, in short:
+
+1. Simplify code that can be simplified.
+2. Delete code that can be deleted, including functions only a test calls (remove the test too).
+3. Write self-documenting code. No comments that restate what the code says.
+4. Verify other agents' work; treat it as written by a junior with no knowledge of our requirements.
+5. Code reads like prose: names, file layout, and tests tell the story.
+
+Also:
+
+- Program to interfaces; extend rather than modify.
+- No global mutable state without asking the user first.
+- Prefer immutable config/context structs over long argument lists (3-4 arguments at most).
+- Prefer pure functions, composition, and dependency injection.
+- One job per function, named descriptively. A "utility" module signals a missing domain.
+- Develop test-first. Arrange/Act/Assert; a test comment states the assertion.
+- Don't assert on log lines, error message strings, or strings in general. Assert on the concrete error type.
+- Keep unit and integration tests separately runnable.
+- `cargo clippy` and `cargo fmt --check` stay clean before pushing. If our change exposes an unrelated failing test or lint, stop and fix it.
+- Avoid documenting detail that goes stale quickly.
