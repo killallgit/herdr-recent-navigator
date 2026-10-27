@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use fs2::FileExt;
@@ -107,6 +107,29 @@ pub fn now_millis() -> u64 {
 /// lag is a wall-clock step backwards, not a delayed hook.
 const MAX_HOOK_LAG_MILLIS: u64 = 60_000;
 
+/// Re-time panes during an alt-tab cycle: panes in `originals` get their
+/// pre-cycle `focused_at` back and `promoted` is stamped `promoted_at`, so the
+/// history reads as if only the promoted pane had been focused.
+pub fn restore_and_promote_pane(
+    originals: &[(String, u64)],
+    promoted: &str,
+    promoted_at: u64,
+) -> anyhow::Result<()> {
+    let path = mru_path();
+    let _lock = acquire_lock()?;
+    let mut entries = read_entries_newest_first(&path);
+    for entry in entries.iter_mut().filter(|e| e.kind == MruKind::Pane) {
+        if let Some((_, focused_at)) = originals.iter().find(|(id, _)| *id == entry.id) {
+            entry.focused_at = *focused_at;
+        }
+        if entry.id == promoted {
+            entry.focused_at = promoted_at;
+        }
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+    write_entries(&path, &entries)
+}
+
 /// Persist an observation to the MRU file.
 ///
 /// Uses a cross-process lock file (`mru.lock`) to serialize concurrent writes
@@ -115,11 +138,7 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
     let path = mru_path();
     let _lock = acquire_lock()?;
 
-    let mut entries: Vec<MruEntry> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+    let mut entries = read_entries_newest_first(&path);
 
     let FocusObservation {
         kind,
@@ -165,17 +184,29 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
 
     entries.truncate(300);
 
+    write_entries(&path, &entries)
+    // Lock released when `_lock` is dropped
+}
+
+fn read_entries_newest_first(path: &Path) -> Vec<MruEntry> {
+    let mut entries: Vec<MruEntry> = fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+    entries
+}
+
+fn write_entries(path: &Path, entries: &[MruEntry]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     // Write to temp file then rename for atomicity.
     // If the process crashes mid-write, the original file is untouched.
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, serde_json::to_string_pretty(&entries)?)?;
-    fs::rename(&tmp_path, &path)?;
-
+    fs::write(&tmp_path, serde_json::to_string_pretty(entries)?)?;
+    fs::rename(&tmp_path, path)?;
     Ok(())
-    // Lock released when `_lock` is dropped
 }
 
 /// Load all MRU entries from the persistent state file.
@@ -401,6 +432,24 @@ mod tests {
             let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
             assert_eq!(ids, ["A", "B"]);
             assert_eq!(load_mru()[0].focused_at, now);
+        });
+    }
+
+    #[test]
+    fn promoting_a_pane_keeps_skipped_stops_in_their_original_order() {
+        with_temp_dir(|_dir| {
+            for (id, at) in [("A", 10), ("B", 20), ("C", 30)] {
+                record_observation(observation(MruKind::Pane, id, at)).unwrap();
+            }
+            let originals: Vec<_> = [("C", 30), ("B", 20), ("A", 10)]
+                .map(|(id, at)| (id.to_string(), at))
+                .into();
+
+            restore_and_promote_pane(&originals, "B", 100).unwrap();
+            restore_and_promote_pane(&originals, "A", 200).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["A", "C", "B"]);
         });
     }
 
