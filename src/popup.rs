@@ -20,26 +20,14 @@ pub enum Toggled {
     Opened(OpenedPopup),
 }
 
-/// Stable across builds, unlike `DefaultHasher`, so the popup opener and the
-/// popup itself always agree on the file name.
-fn fnv1a(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
-}
-
 pub struct PopupState {
     owner_path: PathBuf,
 }
 
 impl PopupState {
     pub fn for_connection(state_dir: &Path, socket_path: Option<&str>) -> Self {
-        let file_name = match socket_path {
-            Some(socket) => format!("pane-{:016x}.lock", fnv1a(socket)),
-            None => "pane.lock".to_string(),
-        };
         Self {
-            owner_path: state_dir.join(file_name),
+            owner_path: crate::connection::state_file(state_dir, socket_path, "pane", "lock"),
         }
     }
 
