@@ -312,10 +312,9 @@ fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
         .map(|i| mid + i)
         .unwrap_or(content.len());
     let line = sanitize_line(&content[line_start..line_end]);
-    // The sanitize step maps each char to a single char, so byte offsets in the
-    // original line are still valid on the sanitized line.
-    let rel = mid - line_start;
-    let rel_c = line[..rel].chars().count();
+    // Sanitizing maps each char to one char but may change byte lengths, so the
+    // match position is carried over as a char count, not a byte offset.
+    let rel_c = content[line_start..mid].chars().count();
 
     let line_c = line.chars().count();
     let start_c = rel_c.saturating_sub(EXCERPT_PRE);
@@ -341,6 +340,25 @@ fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
     out
 }
 
+/// Byte offset in `content` of the char where the first case-insensitive
+/// occurrence of `needle` starts. Lowercasing can change byte lengths, so each
+/// lowered byte is mapped back to the original char it came from.
+fn find_ignoring_case(content: &str, needle: &str) -> Option<usize> {
+    let lowered = content.to_lowercase();
+    // `str::to_lowercase` picks final sigma by context, but σ and ς are both
+    // two bytes, so per-char lengths still line up with `lowered`.
+    let origins: Vec<usize> = content
+        .char_indices()
+        .flat_map(|(offset, c)| {
+            let lowered_len = c.to_lowercase().map(char::len_utf8).sum();
+            std::iter::repeat_n(offset, lowered_len)
+        })
+        .collect();
+    lowered
+        .find(&needle.to_lowercase())
+        .map(|lowered_at| origins[lowered_at])
+}
+
 /// Find the first case-insensitive occurrence of `needle` in `content` and
 /// return an excerpt around it — the `detail` for a `File` row.
 ///
@@ -353,7 +371,7 @@ pub fn content_excerpt(content: &str, needle: &str) -> Option<String> {
     }
     let pos = content
         .find(needle)
-        .or_else(|| content.to_lowercase().find(&needle.to_lowercase()))?;
+        .or_else(|| find_ignoring_case(content, needle))?;
     Some(excerpt_around(content, pos, needle.chars().count()))
 }
 
@@ -547,6 +565,43 @@ mod tests {
         let content = "a\tb\x00c wrap";
         let ex = content_excerpt(content, "wrap").unwrap();
         assert_eq!(ex, "a b c wrap");
+    }
+
+    #[test]
+    fn finds_match_after_length_changing_lowercase() {
+        // 'İ' lowercases to two chars; the match must land on 'é', not inside it.
+        let ex = content_excerpt("İé", "É").unwrap();
+        assert_eq!(ex, "İé");
+    }
+
+    #[test]
+    fn finds_match_after_shrinking_lowercase() {
+        // 'ẞ' shrinks from 3 to 2 bytes lowercased; the match must land on 'x'.
+        let ex = content_excerpt("ẞx", "X").unwrap();
+        assert_eq!(ex, "ẞx");
+    }
+
+    #[test]
+    fn finds_match_after_growing_lowercase() {
+        // 'Ⱥ' grows from 2 to 3 bytes lowercased; the excerpt window must still
+        // start at the match, not at the drifted offset.
+        let content = format!("{}needle tail", "Ⱥ".repeat(30));
+        let ex = content_excerpt(&content, "NEEDLE").unwrap();
+        assert_eq!(ex, format!("…{}needle tail", "Ⱥ".repeat(EXCERPT_PRE)));
+    }
+
+    #[test]
+    fn finds_uppercase_word_by_lowercase_final_sigma() {
+        // A lowercase final 'ς' must match the uppercase 'Σ' ending the word.
+        let ex = content_excerpt("ΟΔΟΣ", "οδος").unwrap();
+        assert_eq!(ex, "ΟΔΟΣ");
+    }
+
+    #[test]
+    fn finds_match_after_multibyte_control_chars() {
+        // U+0085 (2 bytes) sanitizes to a 1-byte space; the match must still be excerpted.
+        let ex = content_excerpt("\u{85}\u{85}\u{85}éx", "x").unwrap();
+        assert_eq!(ex, "   éx");
     }
 
     #[test]
