@@ -1,4 +1,4 @@
-id = "beyondlex.herdr-recent-navigator"
+id = "killallgit.herdr-recent-navigator"
 name = "Herdr Recent Navigator"
 version = "0.8.0"
 description = "Recent workspaces, tabs, panes, and AI agents switcher for Herdr."

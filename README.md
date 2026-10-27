@@ -86,8 +86,8 @@ herdr plugin link "$PWD"
 | Current install method | Upgrade command |
 |---|---|
 | curl \| bash | Re-run the curl command |
-| `herdr plugin install` | `herdr plugin uninstall beyondlex.herdr-recent-navigator && herdr plugin install beyondlex/herdr-recent-navigator` |
-| Build from source | `git pull && cargo build --release && herdr plugin unlink beyondlex.herdr-recent-navigator && herdr plugin link "$PWD"` |
+| `herdr plugin install` | `herdr plugin uninstall killallgit.herdr-recent-navigator && herdr plugin install beyondlex/herdr-recent-navigator` |
+| Build from source | `git pull && cargo build --release && herdr plugin unlink killallgit.herdr-recent-navigator && herdr plugin link "$PWD"` |
 
 ## Bind a shortcut
 
@@ -97,7 +97,7 @@ Add to your Herdr config:
 [[keys.command]]
 key = "cmd+e"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-workspaces"
+command = "killallgit.herdr-recent-navigator.focus-workspaces"
 description = "Open Navigator: Workspace"
 
 
@@ -105,19 +105,19 @@ description = "Open Navigator: Workspace"
 [[keys.command]]
 key = "cmd+i"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-tabs"
+command = "killallgit.herdr-recent-navigator.focus-tabs"
 description = "Open Navigator: Tab"
 
 [[keys.command]]
 key = "prefix+u"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-panes"
+command = "killallgit.herdr-recent-navigator.focus-panes"
 description = "Open Navigator: Pane"
 
 [[keys.command]]
 key = "prefix+o"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-agents"
+command = "killallgit.herdr-recent-navigator.focus-agents"
 description = "Open Navigator: Agent"
 ```
 
@@ -143,19 +143,19 @@ via MRU history, no dialog needed:
 [[keys.command]]
 key = "prefix+t"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-previous-tab"
+command = "killallgit.herdr-recent-navigator.focus-previous-tab"
 description = "Jump to previous tab"
 
 [[keys.command]]
 key = "cmd+y"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-previous-pane"
+command = "killallgit.herdr-recent-navigator.focus-previous-pane"
 description = "Jump to previous pane"
 
 [[keys.command]]
 key = "prefix+a"
 type = "plugin_action"
-command = "beyondlex.herdr-recent-navigator.focus-previous-agent"
+command = "killallgit.herdr-recent-navigator.focus-previous-agent"
 description = "Jump to previous agent"
 ```
 
@@ -169,8 +169,8 @@ User settings live in `config.toml` inside the plugin's config directory, which
 Herdr keeps separate from the plugin files so upgrades never overwrite it:
 
 ```bash
-herdr plugin config-dir beyondlex.herdr-recent-navigator
-# usually ~/.config/herdr/plugins/config/beyondlex.herdr-recent-navigator
+herdr plugin config-dir killallgit.herdr-recent-navigator
+# usually ~/.config/herdr/plugins/config/killallgit.herdr-recent-navigator
 ```
 
 Create `config.toml` there (the installer seeds a commented template if the
