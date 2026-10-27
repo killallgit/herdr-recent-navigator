@@ -6,6 +6,7 @@ mod ipc;
 mod models;
 mod mru;
 mod others;
+mod popup;
 mod theme;
 mod tracker;
 mod ui;
@@ -43,10 +44,14 @@ type RunInnerResult = Result<(
     bool,
 )>;
 
-fn pane_lock_path() -> PathBuf {
-    std::env::temp_dir()
-        .join("herdr-recent-navigator")
-        .join("pane.lock")
+fn popup_state() -> popup::PopupState {
+    popup::PopupState::for_connection(
+        &tracker::state_dir_or_default(),
+        std::env::var("HERDR_SOCKET_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .as_deref(),
+    )
 }
 
 fn main() -> Result<()> {
@@ -132,9 +137,9 @@ fn main() -> Result<()> {
     )?;
 
     // ── Terminal cleanup ──
-    // Clean up the lock file so the next shortcut press opens, not closes.
-    if let Err(e) = std::fs::remove_file(pane_lock_path()) {
-        log::debug!("Failed to remove pane lock file: {e}");
+    // Release this popup's state so the next shortcut press opens, not closes.
+    if let Err(e) = popup_state().release(ctx.self_pane_id.as_deref()) {
+        log::debug!("Failed to release popup state: {e}");
     }
     // Write a cleanup sequence directly so the pane overlay restores cleanly.
     {
@@ -900,96 +905,96 @@ fn get_selected_target_from_list(
         })
 }
 
+/// Runs `herdr plugin pane ...` for the navigator popup.
+struct HerdrCli {
+    bin: String,
+    plugin_id: String,
+}
+
+impl popup::HerdrPopups for HerdrCli {
+    fn close(&self, pane_id: &str) -> bool {
+        log::info!("pane-open: closing existing pane {pane_id}");
+        ProcessCommand::new(&self.bin)
+            .args(["plugin", "pane", "close", pane_id])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn open(&self) -> Result<popup::OpenedPopup> {
+        // Detect narrow panes — if < 80 cols, use a full-width popup for a
+        // mobile-friendly view. Older Herdr set HERDR_PANE_COLS; current Herdr does
+        // not, so fall back to the active tab's width from `herdr pane layout`.
+        let pane_cols = std::env::var("HERDR_PANE_COLS")
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+            .map(|w| (w, "HERDR_PANE_COLS"))
+            .or_else(|| ipc::fetch_layout_width().ok().map(|w| (w, "pane layout")));
+        if pane_cols.is_none() {
+            log::warn!(
+                "pane-open: no HERDR_PANE_COLS and `herdr pane layout` failed; assuming a wide client"
+            );
+        }
+        let narrow = pane_cols.map(|(w, _)| w < 80).unwrap_or(false);
+        log::info!(
+            "pane-open: pane_cols={:?} → {}",
+            pane_cols,
+            if narrow {
+                "100% width"
+            } else {
+                "manifest width (60%)"
+            },
+        );
+        let mut args = vec![
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            &self.plugin_id,
+            "--entrypoint",
+            "navigator",
+            "--placement",
+            "popup",
+            "--focus",
+        ];
+        if narrow {
+            args.extend_from_slice(&["--width", "100%"]);
+        }
+        let output = ProcessCommand::new(&self.bin)
+            .args(&args)
+            .output()
+            .context("Failed to run herdr plugin pane open")?;
+
+        let pane_id = output
+            .status
+            .success()
+            .then(|| extract_pane_id(&String::from_utf8_lossy(&output.stdout)))
+            .flatten();
+        if let Some(pane_id) = &pane_id {
+            log::info!("pane-open: opened pane {pane_id}");
+        }
+        Ok(popup::OpenedPopup {
+            pane_id,
+            exit_code: output.status.code().unwrap_or(1),
+        })
+    }
+}
+
 /// Toggle the navigator overlay pane open/closed.
 fn handle_pane_open() -> Result<()> {
-    let herdr_bin = std::env::var("HERDR_BIN_PATH")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "herdr".to_string());
-    let plugin_id = std::env::var("HERDR_PLUGIN_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "recent-navigator".to_string());
-
-    // If lock file exists, close the existing pane (toggle closed)
-    let lock_path = pane_lock_path();
-    if let Some(parent) = lock_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let herdr = HerdrCli {
+        bin: std::env::var("HERDR_BIN_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "herdr".to_string()),
+        plugin_id: std::env::var("HERDR_PLUGIN_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "recent-navigator".to_string()),
+    };
+    match popup_state().toggle(&herdr)? {
+        popup::Toggled::Closed => Ok(()),
+        popup::Toggled::Opened(opened) => std::process::exit(opened.exit_code),
     }
-    if let Ok(pane_id) = std::fs::read_to_string(&lock_path) {
-        let pane_id = pane_id.trim().to_string();
-        log::info!("pane-open: closing existing pane {pane_id}");
-        let status = ProcessCommand::new(&herdr_bin)
-            .args(["plugin", "pane", "close", &pane_id])
-            .status();
-        if let Err(e) = std::fs::remove_file(&lock_path) {
-            log::warn!("Failed to remove lock file: {e}");
-        }
-        if let Ok(s) = status
-            && s.success()
-        {
-            return Ok(());
-        }
-        // Stale lock — close failed, fall through to open a fresh pane
-        log::warn!("pane-open: stale lock, opening fresh pane");
-    }
-
-    // Open a new navigator pane
-    // Detect narrow panes — if < 80 cols, use a full-width popup for a
-    // mobile-friendly view. Older Herdr set HERDR_PANE_COLS; current Herdr does
-    // not, so fall back to the active tab's width from `herdr pane layout`.
-    let pane_cols = std::env::var("HERDR_PANE_COLS")
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .map(|w| (w, "HERDR_PANE_COLS"))
-        .or_else(|| ipc::fetch_layout_width().ok().map(|w| (w, "pane layout")));
-    if pane_cols.is_none() {
-        log::warn!(
-            "pane-open: no HERDR_PANE_COLS and `herdr pane layout` failed; assuming a wide client"
-        );
-    }
-    let narrow = pane_cols.map(|(w, _)| w < 80).unwrap_or(false);
-    log::info!(
-        "pane-open: pane_cols={:?} → {}",
-        pane_cols,
-        if narrow {
-            "100% width"
-        } else {
-            "manifest width (60%)"
-        },
-    );
-    let mut args = vec![
-        "plugin",
-        "pane",
-        "open",
-        "--plugin",
-        &plugin_id,
-        "--entrypoint",
-        "navigator",
-        "--placement",
-        "popup",
-        "--focus",
-    ];
-    if narrow {
-        args.extend_from_slice(&["--width", "100%"]);
-    }
-    let output = ProcessCommand::new(&herdr_bin)
-        .args(&args)
-        .output()
-        .context("Failed to run herdr plugin pane open")?;
-
-    // Parse response to extract pane_id for the lock file
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(pane_id) = extract_pane_id(&stdout) {
-            log::info!("pane-open: opened pane {pane_id}");
-            if let Err(e) = std::fs::write(&lock_path, &pane_id) {
-                log::error!("Failed to write pane lock file: {e}");
-            }
-        }
-    }
-
-    std::process::exit(output.status.code().unwrap_or(1));
 }
 
 /// Resolve the path to Herdr's own config file.

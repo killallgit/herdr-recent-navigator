@@ -16,9 +16,9 @@ tasks:
       - cargo build --locked
 
   build:release:
-    desc: Build the release binary that Herdr runs
+    desc: Build the release binary that Herdr runs, into ./target where the manifest looks
     cmds:
-      - cargo build --release --locked
+      - cargo build --release --locked --target-dir target
 
   test:
     desc: Run the full test suite
