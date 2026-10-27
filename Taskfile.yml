@@ -1,7 +1,7 @@
 version: "3"
 
 vars:
-  PLUGIN_ID: beyondlex.herdr-recent-navigator
+  PLUGIN_ID: killallgit.herdr-recent-navigator
 
 tasks:
   default:

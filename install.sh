@@ -56,7 +56,7 @@ ok "Installed to $INSTALL_DIR/$BIN"
 # ── Generate plugin manifest ─────────────────────────
 header "Generating plugin manifest"
 cat > "$INSTALL_DIR/herdr-plugin.toml" <<PLUGIN_EOF
-id = "beyondlex.herdr-recent-navigator"
+id = "killallgit.herdr-recent-navigator"
 name = "Herdr Recent Navigator"
 version = "$VERSION"
 description = "Recent workspaces, tabs, panes, and AI agents switcher for Herdr."
@@ -167,7 +167,7 @@ if command -v herdr &>/dev/null; then
 
   # Seed a settings template in Herdr's per-plugin config dir. This directory
   # is never regenerated, so user edits survive upgrades. Never overwrite.
-  CONFIG_DIR="$(herdr plugin config-dir beyondlex.herdr-recent-navigator 2>/dev/null || true)"
+  CONFIG_DIR="$(herdr plugin config-dir killallgit.herdr-recent-navigator 2>/dev/null || true)"
   if [ -n "$CONFIG_DIR" ]; then
     CONFIG_FILE="$CONFIG_DIR/config.toml"
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -201,7 +201,7 @@ CONFIG_EOF
       ok "Created settings file at $CONFIG_FILE"
     fi
   else
-    CONFIG_FILE="\$(herdr plugin config-dir beyondlex.herdr-recent-navigator)/config.toml"
+    CONFIG_FILE="\$(herdr plugin config-dir killallgit.herdr-recent-navigator)/config.toml"
   fi
 
   printf "\n  ${GREEN}${BOLD}✔ Installation complete!${NC}\n"
@@ -210,5 +210,5 @@ CONFIG_EOF
 else
   warn "Herdr not found. Install Herdr first, then run:"
   printf "  ${CYAN}herdr plugin link${NC} ${DIM}%s${NC}\n" "$INSTALL_DIR"
-  printf "  ${DIM}Then configure theme and keybindings at${NC} ${BOLD}\$(herdr plugin config-dir beyondlex.herdr-recent-navigator)/config.toml${NC}${DIM}.${NC}\n\n"
+  printf "  ${DIM}Then configure theme and keybindings at${NC} ${BOLD}\$(herdr plugin config-dir killallgit.herdr-recent-navigator)/config.toml${NC}${DIM}.${NC}\n\n"
 fi
