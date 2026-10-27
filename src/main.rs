@@ -446,8 +446,8 @@ fn handle_track() -> Result<()> {
     // Every event trigger is also an opportunity to capture the full current
     // focus state via IPC, filling gaps when Herdr doesn't emit events for
     // every tab/pane switch within a workspace.
-    let polled_at = tracker::now_millis();
     if let Ok((pane_id, tab_id, ws_id, pane_label)) = ipc::fetch_focused_pane_info() {
+        let polled_at = tracker::now_millis();
         let tab_name = ipc::fetch_tab_name(&tab_id, &ws_id);
         let ws_name = ipc::fetch_workspace_name(&ws_id);
         let pane_name = Some(pane_label).filter(|s| !s.is_empty());

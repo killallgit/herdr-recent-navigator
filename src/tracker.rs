@@ -142,9 +142,11 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
         .iter()
         .find(|e| e.kind == kind && e.id == id)
         .cloned();
+    if old.as_ref().is_some_and(|o| o.focused_at > observed_at) {
+        return Ok(());
+    }
     entries.retain(|e| !(e.kind == kind && e.id == id));
 
-    let observed_at = observed_at.max(old.as_ref().map_or(0, |o| o.focused_at));
     let position = entries
         .iter()
         .position(|e| e.focused_at <= observed_at)
@@ -346,6 +348,27 @@ mod tests {
 
             let timestamps: Vec<_> = load_mru().into_iter().map(|e| e.focused_at).collect();
             assert_eq!(timestamps, [8, 7, 6, 5, 4, 3, 2, 1]);
+        });
+    }
+
+    #[test]
+    fn test_delayed_older_observation_does_not_overwrite_newer_fields() {
+        with_temp_dir(|_dir| {
+            record_observation(
+                FocusObservation::new(MruKind::Tab, "t1", "ws-new", 5)
+                    .named(Some("Newer".into()), Some("NewWs".into())),
+            )
+            .unwrap();
+            record_observation(
+                FocusObservation::new(MruKind::Tab, "t1", "ws-old", 2)
+                    .named(Some("Older".into()), Some("OldWs".into())),
+            )
+            .unwrap();
+
+            let entry = load_mru().remove(0);
+            assert_eq!(entry.workspace_id, "ws-new");
+            assert_eq!(entry.name.as_deref(), Some("Newer"));
+            assert_eq!(entry.workspace_name.as_deref(), Some("NewWs"));
         });
     }
 
