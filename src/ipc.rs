@@ -675,13 +675,7 @@ fn herdr_cli_raw(args: &[&str]) -> Result<String> {
 /// Fetch a pane's terminal buffer as ANSI-stripped text via `herdr pane read`.
 /// Returns `None` when the pane has no readable scrollback.
 pub fn fetch_pane_content(pane_id: &str) -> Result<Option<String>> {
-    let raw = herdr_cli_raw(&[
-        "pane",
-        "read",
-        pane_id,
-        "--source",
-        "recent-unwrapped",
-    ])?;
+    let raw = herdr_cli_raw(&["pane", "read", pane_id, "--source", "recent-unwrapped"])?;
     let stripped = crate::others::strip_ansi(&raw);
     if stripped.trim().is_empty() {
         Ok(None)
@@ -1099,7 +1093,10 @@ mod tests {
         assert_eq!(shell_entry.ssh_target, None);
         let ssh_entry = map.get("p-ssh").unwrap();
         assert_eq!(ssh_entry.cwd.as_deref(), Some("/work"));
-        assert_eq!(ssh_entry.command.as_deref(), Some("ssh -p 2200 lex@10.0.0.9"));
+        assert_eq!(
+            ssh_entry.command.as_deref(),
+            Some("ssh -p 2200 lex@10.0.0.9")
+        );
         assert_eq!(ssh_entry.ssh_target.as_deref(), Some("lex@10.0.0.9:2200"));
         // Agent panes never get entries.
         assert!(!map.contains_key("p-agent"));
@@ -1207,8 +1204,14 @@ mod tests {
         map.insert("p-cached".to_string(), "old cached content".to_string());
         let updated = refresh_contents(&nodes, &mut map, Some("self")).unwrap();
         assert_eq!(updated, 1);
-        assert_eq!(map.get("p-shell").map(String::as_str), Some("buffered text\n"));
-        assert_eq!(map.get("p-cached").map(String::as_str), Some("old cached content"));
+        assert_eq!(
+            map.get("p-shell").map(String::as_str),
+            Some("buffered text\n")
+        );
+        assert_eq!(
+            map.get("p-cached").map(String::as_str),
+            Some("old cached content")
+        );
         assert!(!map.contains_key("p-agent"));
         assert!(!map.contains_key("self"));
 

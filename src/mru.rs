@@ -102,9 +102,13 @@ pub fn build_display_list(
         CategoryTab::Panes => {
             build_pane_items(&all, opts.pane_ts, opts.active_pane_id, opts.self_pane_id)
         }
-        CategoryTab::All => {
-            build_other_items(&all, opts.pane_ts, opts.active_pane_id, opts.self_pane_id, opts.others)
-        }
+        CategoryTab::All => build_other_items(
+            &all,
+            opts.pane_ts,
+            opts.active_pane_id,
+            opts.self_pane_id,
+            opts.others,
+        ),
     }
 }
 
@@ -355,10 +359,7 @@ fn build_other_items(
             continue;
         };
         let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
-        let pane_name = n
-            .pane_name
-            .clone()
-            .unwrap_or_else(|| n.pane_id.clone());
+        let pane_name = n.pane_name.clone().unwrap_or_else(|| n.pane_id.clone());
 
         let mut push = |source: crate::models::OtherSource, detail: &str, context: String| {
             items.push(DisplayItem::Other {
@@ -1028,7 +1029,10 @@ pub fn match_indices(text: &str, query: &str) -> Vec<usize> {
         let mut haystack_buf: Vec<char> = Vec::new();
         let haystack = nucleo_matcher::Utf32Str::new(text, &mut haystack_buf);
         let mut raw_indices: Vec<u32> = Vec::new();
-        if pattern.indices(haystack, &mut matcher, &mut raw_indices).is_some() {
+        if pattern
+            .indices(haystack, &mut matcher, &mut raw_indices)
+            .is_some()
+        {
             raw_indices.sort_unstable();
             raw_indices.dedup();
             raw_indices.into_iter().map(|i| i as usize).collect()
@@ -1233,7 +1237,8 @@ mod tests {
     /// Linked worktrees sort directly under their main-checkout workspace.
     #[test]
     fn test_worktrees_group_under_main_workspace() {
-        let ws = |id: &str, name: &str, ts| make_node(id, id, name, "t", AgentStatus::None, ts, None);
+        let ws =
+            |id: &str, name: &str, ts| make_node(id, id, name, "t", AgentStatus::None, ts, None);
         let nodes = vec![
             ws("ws-wt", "shed ⎇ feat", 30),
             ws("ws-other", "notes", 20),
@@ -1635,7 +1640,9 @@ mod tests {
         let pane4_sources: Vec<crate::models::OtherSource> = items
             .iter()
             .filter_map(|it| match it {
-                DisplayItem::Other { pane_id, source, .. } if pane_id == "pane-4" => Some(*source),
+                DisplayItem::Other {
+                    pane_id, source, ..
+                } if pane_id == "pane-4" => Some(*source),
                 _ => None,
             })
             .collect();
@@ -1701,7 +1708,10 @@ mod tests {
         let nodes = sample_nodes();
         let empty = HashMap::new();
         let mut contents = HashMap::new();
-        contents.insert("pane-4".to_string(), "Started DeployService on 8081\nnext line\n".to_string());
+        contents.insert(
+            "pane-4".to_string(),
+            "Started DeployService on 8081\nnext line\n".to_string(),
+        );
         contents.insert("pane-3".to_string(), "hot text here\n".to_string()); // agent pane
         // pane-4 is editing a file, pane-5 shows terminal output.
         let mut others: HashMap<String, PaneOthers> = HashMap::new();
@@ -1724,11 +1734,25 @@ mod tests {
             },
         );
 
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, Some("pane-5"), "deployservice");
+        let items = build_content_items(
+            &nodes,
+            &contents,
+            &others,
+            &empty,
+            None,
+            Some("pane-5"),
+            "deployservice",
+        );
         assert_eq!(items.len(), 1);
         let item = &items[0];
         match item {
-            DisplayItem::Other { pane_id, source, detail, context, .. } => {
+            DisplayItem::Other {
+                pane_id,
+                source,
+                detail,
+                context,
+                ..
+            } => {
                 assert_eq!(pane_id, "pane-4");
                 assert_eq!(*source, crate::models::OtherSource::File);
                 assert!(detail.eq_ignore_ascii_case("started deployservice on 8081"));
@@ -1741,7 +1765,10 @@ mod tests {
         }
 
         // A terminal-output pane is typed `term`, not `file`.
-        contents.insert("pane-5".to_string(), "deploy failed: connection refused\n".to_string());
+        contents.insert(
+            "pane-5".to_string(),
+            "deploy failed: connection refused\n".to_string(),
+        );
         let items = build_content_items(&nodes, &contents, &others, &empty, None, None, "deploy");
         let pane5 = items
             .iter()
@@ -1756,11 +1783,27 @@ mod tests {
         );
 
         // No match → empty list; agent/content never searched.
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, Some("pane-5"), "zzz-no");
+        let items = build_content_items(
+            &nodes,
+            &contents,
+            &others,
+            &empty,
+            None,
+            Some("pane-5"),
+            "zzz-no",
+        );
         assert!(items.is_empty());
 
         // No cached content for any pane → nothing to match.
-        let items = build_content_items(&nodes, &HashMap::new(), &others, &empty, None, Some("pane-5"), "deployservice");
+        let items = build_content_items(
+            &nodes,
+            &HashMap::new(),
+            &others,
+            &empty,
+            None,
+            Some("pane-5"),
+            "deployservice",
+        );
         assert!(items.is_empty());
     }
 
@@ -1838,7 +1881,10 @@ mod tests {
         });
         let empty = HashMap::new();
         let mut contents = HashMap::new();
-        contents.insert("pane-6".to_string(), "ERROR: auth token expired\n".to_string());
+        contents.insert(
+            "pane-6".to_string(),
+            "ERROR: auth token expired\n".to_string(),
+        );
         let mut others = HashMap::new();
         others.insert(
             "pane-6".into(),
@@ -2005,7 +2051,10 @@ mod tests {
         assert_eq!(sources(&items), vec![crate::models::OtherSource::File]);
         match &items[0] {
             DisplayItem::Other {
-                pane_id, detail, context, ..
+                pane_id,
+                detail,
+                context,
+                ..
             } => {
                 assert_eq!(pane_id, "pane-4");
                 assert_eq!(detail, "/repo/auth/src/main.rs");
@@ -2026,7 +2075,10 @@ mod tests {
         assert_eq!(sources(&items), vec![crate::models::OtherSource::Terminal]);
         match &items[0] {
             DisplayItem::Other {
-                pane_id, detail, context, ..
+                pane_id,
+                detail,
+                context,
+                ..
             } => {
                 assert_eq!(pane_id, "pane-5");
                 assert_eq!(detail, "ls: No such file or directory");
@@ -2465,7 +2517,10 @@ mod tests {
                     &mut matcher,
                 )
                 .unwrap();
-            assert!(full > detail, "precondition: workspace full-text hit outranks detail");
+            assert!(
+                full > detail,
+                "precondition: workspace full-text hit outranks detail"
+            );
         });
 
         let ranked = search_display_items(&items, "app-server-01");
@@ -2493,16 +2548,18 @@ mod tests {
             2000,
             None,
         );
-        let records = build_other_items(
-            &[&node],
-            &HashMap::new(),
-            None,
-            None,
-            &others,
-        );
+        let records = build_other_items(&[&node], &HashMap::new(), None, None, &others);
         let ssh_record = records
             .iter()
-            .find(|r| matches!(r, DisplayItem::Other { source: crate::models::OtherSource::Ssh, .. }))
+            .find(|r| {
+                matches!(
+                    r,
+                    DisplayItem::Other {
+                        source: crate::models::OtherSource::Ssh,
+                        ..
+                    }
+                )
+            })
             .expect("ssh record exists");
         let text = ssh_record.search_text();
         assert!(text.starts_with("ssh "), "source label first: {text}");

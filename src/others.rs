@@ -108,8 +108,20 @@ pub fn parse_ssh_target(cmd: &str) -> Option<String> {
 
 /// Common login shells by basename (an idle shell's foreground command).
 const SHELL_NAMES: &[&str] = &[
-    "zsh", "bash", "sh", "dash", "ksh", "tcsh", "fish", "csh", "ash", "nu", "elvish", "xonsh",
-    "pwsh", "powershell",
+    "zsh",
+    "bash",
+    "sh",
+    "dash",
+    "ksh",
+    "tcsh",
+    "fish",
+    "csh",
+    "ash",
+    "nu",
+    "elvish",
+    "xonsh",
+    "pwsh",
+    "powershell",
 ];
 
 /// Return true if the foreground command is (just) a login shell.
@@ -295,12 +307,14 @@ const EXCERPT_POST: usize = 80;
 /// Long regions are trimmed with ellipses.
 fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
     let line_start = content[..mid].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line_end = content[mid..].find('\n').map(|i| mid + i).unwrap_or(content.len());
+    let line_end = content[mid..]
+        .find('\n')
+        .map(|i| mid + i)
+        .unwrap_or(content.len());
     let line = sanitize_line(&content[line_start..line_end]);
-    // The sanitize step maps each char to a single char, so byte offsets in the
-    // original line are still valid on the sanitized line.
-    let rel = mid - line_start;
-    let rel_c = line[..rel].chars().count();
+    // Sanitizing maps each char to one char but may change byte lengths, so the
+    // match position is carried over as a char count, not a byte offset.
+    let rel_c = content[line_start..mid].chars().count();
 
     let line_c = line.chars().count();
     let start_c = rel_c.saturating_sub(EXCERPT_PRE);
@@ -309,13 +323,40 @@ fn excerpt_around(content: &str, mid: usize, needle_len: usize) -> String {
     if start_c > 0 {
         out.push('…');
     }
-    let start_b = line.char_indices().nth(start_c).map(|(i, _)| i).unwrap_or(line.len());
-    let end_b = line.char_indices().nth(end_c).map(|(i, _)| i).unwrap_or(line.len());
+    let start_b = line
+        .char_indices()
+        .nth(start_c)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    let end_b = line
+        .char_indices()
+        .nth(end_c)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
     out.push_str(&line[start_b..end_b]);
     if end_c < line_c {
         out.push('…');
     }
     out
+}
+
+/// Byte offset in `content` of the char where the first case-insensitive
+/// occurrence of `needle` starts. Lowercasing can change byte lengths, so each
+/// lowered byte is mapped back to the original char it came from.
+fn find_ignoring_case(content: &str, needle: &str) -> Option<usize> {
+    let lowered = content.to_lowercase();
+    // `str::to_lowercase` picks final sigma by context, but σ and ς are both
+    // two bytes, so per-char lengths still line up with `lowered`.
+    let origins: Vec<usize> = content
+        .char_indices()
+        .flat_map(|(offset, c)| {
+            let lowered_len = c.to_lowercase().map(char::len_utf8).sum();
+            std::iter::repeat_n(offset, lowered_len)
+        })
+        .collect();
+    lowered
+        .find(&needle.to_lowercase())
+        .map(|lowered_at| origins[lowered_at])
 }
 
 /// Find the first case-insensitive occurrence of `needle` in `content` and
@@ -330,7 +371,7 @@ pub fn content_excerpt(content: &str, needle: &str) -> Option<String> {
     }
     let pos = content
         .find(needle)
-        .or_else(|| content.to_lowercase().find(&needle.to_lowercase()))?;
+        .or_else(|| find_ignoring_case(content, needle))?;
     Some(excerpt_around(content, pos, needle.chars().count()))
 }
 
@@ -443,23 +484,14 @@ mod tests {
 
     #[test]
     fn strips_sgr_and_csi() {
-        assert_eq!(
-            strip_ansi("\x1b[38;5;196mred\x1b[0m plain"),
-            "red plain"
-        );
+        assert_eq!(strip_ansi("\x1b[38;5;196mred\x1b[0m plain"), "red plain");
         assert_eq!(strip_ansi("\x1b[1mB\x1b[0m"), "B");
     }
 
     #[test]
     fn strips_osc_title_sequences() {
-        assert_eq!(
-            strip_ansi("\x1b]0;tmux title\x07text"),
-            "text"
-        );
-        assert_eq!(
-            strip_ansi("\x1b]633;prop=;row=1\x1b\\row"),
-            "row"
-        );
+        assert_eq!(strip_ansi("\x1b]0;tmux title\x07text"), "text");
+        assert_eq!(strip_ansi("\x1b]633;prop=;row=1\x1b\\row"), "row");
     }
 
     #[test]
@@ -469,7 +501,10 @@ mod tests {
 
     #[test]
     fn leaves_plain_text_unchanged() {
-        assert_eq!(strip_ansi("plain text with no escapes"), "plain text with no escapes");
+        assert_eq!(
+            strip_ansi("plain text with no escapes"),
+            "plain text with no escapes"
+        );
     }
 
     // ── content_excerpt ──
@@ -493,7 +528,10 @@ mod tests {
         // Match must sit near the LEFT edge so a narrow Detail column still shows it.
         let prefix = ex[..ex.find("NEEDLE").unwrap()].chars().count();
         let leading_marker = usize::from(ex.starts_with('…'));
-        assert!(prefix - leading_marker <= EXCERPT_PRE, "match buried at char {prefix}: {ex}");
+        assert!(
+            prefix - leading_marker <= EXCERPT_PRE,
+            "match buried at char {prefix}: {ex}"
+        );
         assert!(ex.chars().count() <= EXCERPT_PRE + 6 + EXCERPT_POST + 2);
     }
 
@@ -509,7 +547,10 @@ mod tests {
         let ex = content_excerpt(content, "thers").unwrap();
         let prefix = ex[..ex.find("thers").unwrap()].chars().count();
         let leading_marker = usize::from(ex.starts_with('…'));
-        assert!(prefix - leading_marker <= EXCERPT_PRE, "match buried at char {prefix}: {ex}");
+        assert!(
+            prefix - leading_marker <= EXCERPT_PRE,
+            "match buried at char {prefix}: {ex}"
+        );
     }
 
     #[test]
@@ -524,6 +565,43 @@ mod tests {
         let content = "a\tb\x00c wrap";
         let ex = content_excerpt(content, "wrap").unwrap();
         assert_eq!(ex, "a b c wrap");
+    }
+
+    #[test]
+    fn finds_match_after_length_changing_lowercase() {
+        // 'İ' lowercases to two chars; the match must land on 'é', not inside it.
+        let ex = content_excerpt("İé", "É").unwrap();
+        assert_eq!(ex, "İé");
+    }
+
+    #[test]
+    fn finds_match_after_shrinking_lowercase() {
+        // 'ẞ' shrinks from 3 to 2 bytes lowercased; the match must land on 'x'.
+        let ex = content_excerpt("ẞx", "X").unwrap();
+        assert_eq!(ex, "ẞx");
+    }
+
+    #[test]
+    fn finds_match_after_growing_lowercase() {
+        // 'Ⱥ' grows from 2 to 3 bytes lowercased; the excerpt window must still
+        // start at the match, not at the drifted offset.
+        let content = format!("{}needle tail", "Ⱥ".repeat(30));
+        let ex = content_excerpt(&content, "NEEDLE").unwrap();
+        assert_eq!(ex, format!("…{}needle tail", "Ⱥ".repeat(EXCERPT_PRE)));
+    }
+
+    #[test]
+    fn finds_uppercase_word_by_lowercase_final_sigma() {
+        // A lowercase final 'ς' must match the uppercase 'Σ' ending the word.
+        let ex = content_excerpt("ΟΔΟΣ", "οδος").unwrap();
+        assert_eq!(ex, "ΟΔΟΣ");
+    }
+
+    #[test]
+    fn finds_match_after_multibyte_control_chars() {
+        // U+0085 (2 bytes) sanitizes to a 1-byte space; the match must still be excerpted.
+        let ex = content_excerpt("\u{85}\u{85}\u{85}éx", "x").unwrap();
+        assert_eq!(ex, "   éx");
     }
 
     #[test]
@@ -542,7 +620,10 @@ mod tests {
 
     #[test]
     fn parses_user_at_host() {
-        assert_eq!(parse_ssh_target("ssh lex@192.168.1.50"), Some("lex@192.168.1.50".into()));
+        assert_eq!(
+            parse_ssh_target("ssh lex@192.168.1.50"),
+            Some("lex@192.168.1.50".into())
+        );
     }
 
     #[test]
@@ -595,7 +676,10 @@ mod tests {
 
     #[test]
     fn mosh_is_ssh_family() {
-        assert_eq!(parse_ssh_target("mosh user@laptop.local"), Some("user@laptop.local".into()));
+        assert_eq!(
+            parse_ssh_target("mosh user@laptop.local"),
+            Some("user@laptop.local".into())
+        );
     }
 
     #[test]

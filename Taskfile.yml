@@ -1,0 +1,67 @@
+version: "3"
+
+vars:
+  PLUGIN_ID: beyondlex.herdr-recent-navigator
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the debug binary
+    cmds:
+      - cargo build --locked
+
+  build:release:
+    desc: Build the release binary that Herdr runs
+    cmds:
+      - cargo build --release --locked
+
+  test:
+    desc: Run the full test suite
+    cmds:
+      - cargo test --locked
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt
+
+  fmt:check:
+    desc: Fail if any code is unformatted
+    cmds:
+      - cargo fmt --check
+
+  lint:
+    desc: Run clippy with warnings denied
+    cmds:
+      - cargo clippy --locked --all-targets -- -D warnings
+
+  check:
+    desc: Run every gate that must pass before pushing
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: test
+
+  install:
+    desc: Build this checkout and link it into Herdr as the local plugin
+    preconditions:
+      - sh: command -v herdr
+        msg: herdr is not on PATH
+    cmds:
+      - task: build:release
+      - cmd: herdr plugin unlink {{.PLUGIN_ID}}
+        ignore_error: true
+      - herdr plugin link {{.ROOT_DIR}}
+
+  uninstall:
+    desc: Unlink the local plugin from Herdr
+    preconditions:
+      - sh: command -v herdr
+        msg: herdr is not on PATH
+    cmds:
+      - herdr plugin unlink {{.PLUGIN_ID}}

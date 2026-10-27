@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+[ -n "$BD_DOLT_PUSHING" ] && exit 0
+command -v bd >/dev/null 2>&1 || exit 0
+BD_DOLT_PUSHING=1 bd dolt push >&2 || echo "beads: dolt push failed; code push continues" >&2
+exit 0
