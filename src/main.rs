@@ -191,6 +191,7 @@ fn run_inner(cli: &Cli) -> RunInnerResult {
 
     // Record current focus at navigator startup (single pass over nodes)
     if connected && let Some(fpi) = &focused_pane_info {
+        let observed_at = tracker::now_millis();
         let mut pane_name = if fpi.label.is_empty() {
             None
         } else {
@@ -213,30 +214,36 @@ fn run_inner(cli: &Cli) -> RunInnerResult {
             }
         }
 
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Pane,
-            &fpi.pane_id,
-            &fpi.workspace_id,
-            pane_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Pane,
+                &fpi.pane_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(pane_name, ws_name.clone()),
         ) {
             log::error!("Failed to record pane focus event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Tab,
-            &fpi.tab_id,
-            &fpi.workspace_id,
-            tab_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Tab,
+                &fpi.tab_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(tab_name, ws_name.clone()),
         ) {
             log::error!("Failed to record tab focus event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Workspace,
-            &fpi.workspace_id,
-            &fpi.workspace_id,
-            ws_name,
-            None,
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Workspace,
+                &fpi.workspace_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(ws_name, None),
         ) {
             log::error!("Failed to record workspace focus event: {e}");
         }
@@ -397,13 +404,23 @@ fn handle_track() -> Result<()> {
         .get("data")
         .context("HERDR_PLUGIN_EVENT_JSON missing 'data' field")?;
 
+    let event_observed_at = tracker::now_millis();
+    let record_event = |kind, id: &str, workspace_id: &str| {
+        tracker::record_observation(tracker::FocusObservation::new(
+            kind,
+            id,
+            workspace_id,
+            event_observed_at,
+        ))
+    };
+
     match event_name {
         "workspace_focused" => {
             let ws_id = data
                 .get("workspace_id")
                 .and_then(|s| s.as_str())
                 .context("missing workspace_id in workspace.focused data")?;
-            tracker::record_event(tracker::MruKind::Workspace, ws_id, ws_id)?;
+            record_event(tracker::MruKind::Workspace, ws_id, ws_id)?;
         }
         "pane_focused" => {
             let pane_id = data
@@ -414,7 +431,7 @@ fn handle_track() -> Result<()> {
                 .get("workspace_id")
                 .and_then(|s| s.as_str())
                 .context("missing workspace_id in pane.focused data")?;
-            tracker::record_event(tracker::MruKind::Pane, pane_id, ws_id)?;
+            record_event(tracker::MruKind::Pane, pane_id, ws_id)?;
         }
         "tab_focused" => {
             let tab_id = data
@@ -425,7 +442,7 @@ fn handle_track() -> Result<()> {
                 .get("workspace_id")
                 .and_then(|s| s.as_str())
                 .context("missing workspace_id in tab.focused data")?;
-            tracker::record_event(tracker::MruKind::Tab, tab_id, ws_id)?;
+            record_event(tracker::MruKind::Tab, tab_id, ws_id)?;
         }
         _ => {
             log::warn!("Ignoring unknown event type: {}", event_name);
@@ -437,34 +454,26 @@ fn handle_track() -> Result<()> {
     // focus state via IPC, filling gaps when Herdr doesn't emit events for
     // every tab/pane switch within a workspace.
     if let Ok((pane_id, tab_id, ws_id, pane_label)) = ipc::fetch_focused_pane_info() {
+        let polled_at = tracker::now_millis();
         let tab_name = ipc::fetch_tab_name(&tab_id, &ws_id);
         let ws_name = ipc::fetch_workspace_name(&ws_id);
         let pane_name = Some(pane_label).filter(|s| !s.is_empty());
 
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Pane,
-            &pane_id,
-            &ws_id,
-            pane_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(tracker::MruKind::Pane, &pane_id, &ws_id, polled_at)
+                .named(pane_name, ws_name.clone()),
         ) {
             log::error!("Track poll: failed to record pane event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Tab,
-            &tab_id,
-            &ws_id,
-            tab_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(tracker::MruKind::Tab, &tab_id, &ws_id, polled_at)
+                .named(tab_name, ws_name.clone()),
         ) {
             log::error!("Track poll: failed to record tab event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Workspace,
-            &ws_id,
-            &ws_id,
-            ws_name,
-            None,
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(tracker::MruKind::Workspace, &ws_id, &ws_id, polled_at)
+                .named(ws_name, None),
         ) {
             log::error!("Track poll: failed to record workspace event: {e}");
         }

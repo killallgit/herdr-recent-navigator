@@ -68,45 +68,95 @@ fn acquire_lock() -> anyhow::Result<File> {
     Ok(file)
 }
 
-/// Record a focus event (pane/tab/workspace): persist a timestamped entry to the MRU file.
-pub fn record_event(kind: MruKind, id: &str, workspace_id: &str) -> anyhow::Result<()> {
-    record_event_with_names(kind, id, workspace_id, None, None)
+/// A focus change as seen by a `track` process at the moment it looked.
+/// `observed_at` is captured before any slow lookups so that persistence
+/// order cannot rewrite focus chronology.
+pub struct FocusObservation {
+    kind: MruKind,
+    id: String,
+    workspace_id: String,
+    observed_at: u64,
+    name: Option<String>,
+    workspace_name: Option<String>,
 }
 
-/// Same as record_event but with human-readable names for logging/debugging.
+impl FocusObservation {
+    pub fn new(kind: MruKind, id: &str, workspace_id: &str, observed_at: u64) -> Self {
+        Self {
+            kind,
+            id: id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            observed_at,
+            name: None,
+            workspace_name: None,
+        }
+    }
+
+    pub fn named(mut self, name: Option<String>, workspace_name: Option<String>) -> Self {
+        self.name = name;
+        self.workspace_name = workspace_name;
+        self
+    }
+}
+
+pub fn now_millis() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+/// An observation further behind the newest entry than any hook can plausibly
+/// lag is a wall-clock step backwards, not a delayed hook.
+const MAX_HOOK_LAG_MILLIS: u64 = 60_000;
+
+/// Persist an observation to the MRU file.
 ///
 /// Uses a cross-process lock file (`mru.lock`) to serialize concurrent writes
 /// from multiple `track` subcommand processes that Herdr fires simultaneously.
-pub fn record_event_with_names(
-    kind: MruKind,
-    id: &str,
-    workspace_id: &str,
-    name: Option<String>,
-    workspace_name: Option<String>,
-) -> anyhow::Result<()> {
+pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
     let path = mru_path();
     let _lock = acquire_lock()?;
-
-    let now = chrono::Utc::now().timestamp_millis() as u64;
 
     let mut entries: Vec<MruEntry> = fs::read_to_string(&path)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+
+    let FocusObservation {
+        kind,
+        id,
+        workspace_id,
+        observed_at,
+        name,
+        workspace_name,
+    } = observation;
+
+    let newest = entries.first().map_or(0, |e| e.focused_at);
+    let observed_at = if observed_at.saturating_add(MAX_HOOK_LAG_MILLIS) < newest {
+        newest
+    } else {
+        observed_at
+    };
 
     let old = entries
         .iter()
         .find(|e| e.kind == kind && e.id == id)
         .cloned();
+    if old.as_ref().is_some_and(|o| o.focused_at > observed_at) {
+        return Ok(());
+    }
     entries.retain(|e| !(e.kind == kind && e.id == id));
 
+    let position = entries
+        .iter()
+        .position(|e| e.focused_at <= observed_at)
+        .unwrap_or(entries.len());
     entries.insert(
-        0,
+        position,
         MruEntry {
             kind,
-            id: id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            focused_at: now,
+            id,
+            workspace_id,
+            focused_at: observed_at,
             name: name.or_else(|| old.as_ref().and_then(|o| o.name.clone())),
             workspace_name: workspace_name
                 .or_else(|| old.as_ref().and_then(|o| o.workspace_name.clone())),
@@ -186,6 +236,10 @@ mod tests {
     use super::*;
     use crate::test_helpers::with_temp_dir;
 
+    fn record_now(kind: MruKind, id: &str, name: Option<String>) -> anyhow::Result<()> {
+        record_observation(FocusObservation::new(kind, id, "ws-1", now_millis()).named(name, None))
+    }
+
     // ── record_event tests ──
 
     #[test]
@@ -193,7 +247,7 @@ mod tests {
         with_temp_dir(|dir| {
             let path = dir.join("mru.json");
             assert!(!path.exists(), "File should not exist before recording");
-            record_event(MruKind::Pane, "pane-1", "ws-1").unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             assert!(path.exists(), "File should exist after recording");
         });
     }
@@ -201,13 +255,13 @@ mod tests {
     #[test]
     fn test_record_event_updates_timestamp() {
         with_temp_dir(|_dir| {
-            record_event(MruKind::Pane, "pane-1", "ws-1").unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let entries = load_mru();
             assert_eq!(entries.len(), 1);
             let t1 = entries[0].focused_at;
 
             std::thread::sleep(std::time::Duration::from_millis(1));
-            record_event(MruKind::Pane, "pane-1", "ws-1").unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let entries = load_mru();
             assert_eq!(entries.len(), 1, "Duplicate should not add new entry");
             assert!(entries[0].focused_at > t1, "Timestamp should be updated");
@@ -218,7 +272,7 @@ mod tests {
     fn test_record_event_truncates_at_300() {
         with_temp_dir(|_dir| {
             for i in 0..301 {
-                record_event(MruKind::Pane, &format!("pane-{}", i), "ws-1").unwrap();
+                record_now(MruKind::Pane, &format!("pane-{}", i), None).unwrap();
             }
             let entries = load_mru();
             assert_eq!(entries.len(), 300, "Should truncate to 300 entries");
@@ -229,10 +283,9 @@ mod tests {
     #[test]
     fn test_record_event_preserves_name_on_update() {
         with_temp_dir(|_dir| {
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", Some("MyPane".into()), None)
-                .unwrap();
+            record_now(MruKind::Pane, "pane-1", Some("MyPane".into())).unwrap();
 
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
 
             let entries = load_mru();
             assert_eq!(
@@ -240,6 +293,114 @@ mod tests {
                 Some("MyPane"),
                 "Name should be preserved from previous entry"
             );
+        });
+    }
+
+    // ── observation ordering tests ──
+
+    fn observation(kind: MruKind, id: &str, observed_at: u64) -> FocusObservation {
+        FocusObservation::new(kind, id, "ws-1", observed_at)
+    }
+
+    #[test]
+    fn test_delayed_older_observation_stays_behind_newer_entries() {
+        with_temp_dir(|_dir| {
+            record_observation(observation(MruKind::Workspace, "A", 1)).unwrap();
+            record_observation(observation(MruKind::Workspace, "C", 3)).unwrap();
+            record_observation(observation(MruKind::Workspace, "B", 2)).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["C", "B", "A"]);
+        });
+    }
+
+    #[test]
+    fn test_delayed_older_observation_does_not_demote_same_entry() {
+        with_temp_dir(|_dir| {
+            record_observation(
+                observation(MruKind::Workspace, "A", 5).named(Some("Alpha".into()), None),
+            )
+            .unwrap();
+            record_observation(observation(MruKind::Workspace, "A", 2)).unwrap();
+
+            let entries = load_mru();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].focused_at, 5);
+            assert_eq!(entries[0].name.as_deref(), Some("Alpha"));
+        });
+    }
+
+    #[test]
+    fn test_concurrent_out_of_order_observations_persist_in_observation_order() {
+        with_temp_dir(|_dir| {
+            let handles: Vec<_> = [3u64, 7, 1, 5, 2, 8, 4, 6]
+                .into_iter()
+                .map(|observed_at| {
+                    std::thread::spawn(move || {
+                        let id = format!("ws-{observed_at}");
+                        record_observation(observation(MruKind::Workspace, &id, observed_at))
+                            .unwrap();
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            let timestamps: Vec<_> = load_mru().into_iter().map(|e| e.focused_at).collect();
+            assert_eq!(timestamps, [8, 7, 6, 5, 4, 3, 2, 1]);
+        });
+    }
+
+    #[test]
+    fn test_delayed_older_observation_does_not_overwrite_newer_fields() {
+        with_temp_dir(|_dir| {
+            record_observation(
+                FocusObservation::new(MruKind::Tab, "t1", "ws-new", 5)
+                    .named(Some("Newer".into()), Some("NewWs".into())),
+            )
+            .unwrap();
+            record_observation(
+                FocusObservation::new(MruKind::Tab, "t1", "ws-old", 2)
+                    .named(Some("Older".into()), Some("OldWs".into())),
+            )
+            .unwrap();
+
+            let entry = load_mru().remove(0);
+            assert_eq!(entry.workspace_id, "ws-new");
+            assert_eq!(entry.name.as_deref(), Some("Newer"));
+            assert_eq!(entry.workspace_name.as_deref(), Some("NewWs"));
+        });
+    }
+
+    #[test]
+    fn test_observation_into_unsorted_file_lands_in_chronological_place() {
+        with_temp_dir(|dir| {
+            let unsorted = r#"[
+                {"kind":"Workspace","id":"B","workspace_id":"B","focused_at":1},
+                {"kind":"Workspace","id":"C","workspace_id":"C","focused_at":3},
+                {"kind":"Workspace","id":"A","workspace_id":"A","focused_at":0}
+            ]"#;
+            std::fs::write(dir.join("mru.json"), unsorted).unwrap();
+
+            record_observation(observation(MruKind::Workspace, "D", 2)).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["C", "D", "B", "A"]);
+        });
+    }
+
+    #[test]
+    fn test_observation_far_behind_newest_is_treated_as_clock_regression() {
+        with_temp_dir(|_dir| {
+            let now = 10_000_000;
+            record_observation(observation(MruKind::Workspace, "A", now - 10)).unwrap();
+            record_observation(observation(MruKind::Workspace, "B", now)).unwrap();
+            record_observation(observation(MruKind::Workspace, "A", now - 1_000_000)).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["A", "B"]);
+            assert_eq!(load_mru()[0].focused_at, now);
         });
     }
 
@@ -351,7 +512,7 @@ mod tests {
     #[test]
     fn test_record_event_atomic_write_survives_crash() {
         with_temp_dir(|dir| {
-            record_event(MruKind::Pane, "pane-1", "ws-1").unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let path = dir.join("mru.json");
             let content_before = std::fs::read_to_string(&path).unwrap();
 
