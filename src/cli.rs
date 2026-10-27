@@ -44,4 +44,7 @@ pub enum Command {
     CycleOlder,
     /// Step one pane forward again through recently used panes (alt+shift+tab).
     CycleNewer,
+    /// Internal: ends the cycle that began at the given time once Alt is released.
+    #[command(hide = true)]
+    CycleWatch { started_at: u64 },
 }

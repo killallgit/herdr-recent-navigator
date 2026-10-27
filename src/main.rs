@@ -6,6 +6,7 @@ mod data;
 mod format;
 mod ipc;
 mod models;
+mod modifier;
 mod mru;
 mod others;
 mod popup;
@@ -104,6 +105,7 @@ fn main() -> Result<()> {
     match &cli.command {
         Some(CliCommand::CycleOlder) => return handle_cycle(cycle::Direction::Older),
         Some(CliCommand::CycleNewer) => return handle_cycle(cycle::Direction::Newer),
+        Some(CliCommand::CycleWatch { started_at }) => return handle_cycle_watch(*started_at),
         _ => {}
     }
 
@@ -399,7 +401,7 @@ fn focus_is_from_active_cycle(now: u64) -> bool {
     let Ok(_turn) = store.lock() else {
         return false;
     };
-    let Some(session) = store.load().filter(|s| s.is_active(now)) else {
+    let Some(session) = store.load().filter(|s| s.is_owning(now)) else {
         return false;
     };
     match ipc::fetch_focused_pane_info() {
@@ -661,8 +663,11 @@ fn handle_cycle(direction: cycle::Direction) -> Result<()> {
         live_mru,
         focused_pane: focused.map(|pane| pane.pane_id),
         baseline: tracker::snapshot_times(),
+        hold_tracked: modifier::alt_held() == Some(true),
     };
-    let Some(session) = cycle::Session::advance(store.load(), sighting, direction, now) else {
+    let previous = store.load();
+    let starts_new_cycle = !previous.as_ref().is_some_and(|s| s.is_active(now));
+    let Some(session) = cycle::Session::advance(previous, sighting, direction, now) else {
         log::warn!("cycle: no panes in MRU history");
         return Ok(());
     };
@@ -679,7 +684,40 @@ fn handle_cycle(direction: cycle::Direction) -> Result<()> {
     if let Some(node) = nodes.iter().find(|n| n.pane_id == target) {
         record_cycle_stop(node, session.baseline(), now)?;
     }
+    if starts_new_cycle && session.is_hold_tracked() {
+        spawn_release_watcher(session.started_at());
+    }
     Ok(())
+}
+
+/// Ends the cycle that began at `started_at` as soon as Alt is released, which
+/// is what separates "tap, let go, tap" from "hold Alt and keep pressing Tab".
+fn handle_cycle_watch(started_at: u64) -> Result<()> {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(15);
+    let give_up_at =
+        std::time::Instant::now() + std::time::Duration::from_millis(cycle::MAX_HOLD_MILLIS);
+    while modifier::alt_held() == Some(true) && std::time::Instant::now() < give_up_at {
+        std::thread::sleep(POLL);
+    }
+    cycle_store().mark_released(started_at, tracker::now_millis())
+}
+
+fn spawn_release_watcher(started_at: u64) {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let watcher = ProcessCommand::new(exe)
+        .args(["cycle-watch", &started_at.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(e) = watcher {
+        log::warn!("cycle: could not start the release watcher: {e}");
+    }
 }
 
 fn record_cycle_stop(

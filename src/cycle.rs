@@ -8,7 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::tracker::EntryTime;
 
+/// Without release detection, a pause this long ends a cycle.
 pub const IDLE_MILLIS: u64 = 1500;
+/// With release detection, a cycle whose watcher died still ends eventually.
+pub const MAX_HOLD_MILLIS: u64 = 30_000;
+/// After the modifier is released, hooks for the last stops may still be running.
+pub const RELEASE_GRACE_MILLIS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -23,6 +28,8 @@ pub struct Sighting {
     pub focused_pane: Option<String>,
     /// MRU timestamps as they stand before this press.
     pub baseline: Vec<EntryTime>,
+    /// Whether the platform can report when the modifier key is released.
+    pub hold_tracked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +40,12 @@ pub struct Session {
     cursor: usize,
     visited: Vec<String>,
     last_press_at: u64,
+    #[serde(default)]
+    hold_tracked: bool,
+    #[serde(default)]
+    released_at: Option<u64>,
+    #[serde(default)]
+    started_at: u64,
 }
 
 impl Session {
@@ -61,6 +74,9 @@ impl Session {
             cursor: 0,
             visited: Vec::new(),
             last_press_at: now,
+            hold_tracked: sighting.hold_tracked,
+            released_at: None,
+            started_at: now,
         }
     }
 
@@ -96,17 +112,50 @@ impl Session {
             last_press_at: now,
             stops: self.stops,
             baseline: self.baseline,
+            hold_tracked: self.hold_tracked,
+            released_at: self.released_at,
+            started_at: self.started_at,
         })
     }
 
+    /// The modifier key came up: the next press starts a new cycle.
+    pub fn released(self, now: u64) -> Session {
+        Session {
+            released_at: Some(now),
+            ..self
+        }
+    }
+
+    /// Whether the next press continues this cycle.
     pub fn is_active(&self, now: u64) -> bool {
-        now.saturating_sub(self.last_press_at) <= IDLE_MILLIS
+        let since_press = now.saturating_sub(self.last_press_at);
+        if self.hold_tracked {
+            self.released_at.is_none() && since_press <= MAX_HOLD_MILLIS
+        } else {
+            since_press <= IDLE_MILLIS
+        }
+    }
+
+    /// Whether focus events for this cycle's stops are still its own.
+    pub fn is_owning(&self, now: u64) -> bool {
+        self.is_active(now)
+            || self
+                .released_at
+                .is_some_and(|released| now.saturating_sub(released) <= RELEASE_GRACE_MILLIS)
     }
 
     /// Focus events for panes this cycle moved to are its own: the track hook
     /// must not record them, or intermediate stops would reorder history.
     pub fn owns_focus(&self, pane_id: &str, now: u64) -> bool {
-        self.is_active(now) && self.visited.iter().any(|visited| visited == pane_id)
+        self.is_owning(now) && self.visited.iter().any(|visited| visited == pane_id)
+    }
+
+    pub fn is_hold_tracked(&self) -> bool {
+        self.hold_tracked
+    }
+
+    pub fn started_at(&self) -> u64 {
+        self.started_at
     }
 
     pub fn baseline(&self) -> &[EntryTime] {
@@ -163,6 +212,17 @@ impl Store {
     pub fn clear(&self) {
         let _ = std::fs::remove_file(&self.path);
     }
+
+    /// Ends the cycle that began at `started_at`; a newer cycle is left alone.
+    pub fn mark_released(&self, started_at: u64, now: u64) -> anyhow::Result<()> {
+        let _turn = self.lock()?;
+        match self.load() {
+            Some(session) if session.started_at() == started_at => {
+                self.save(&session.released(now))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +239,15 @@ mod tests {
             live_mru: ids(panes),
             focused_pane: panes.first().map(|id| id.to_string()),
             baseline: Vec::new(),
+            hold_tracked: false,
+        }
+    }
+
+    /// Like `see`, on a platform that reports when the modifier is released.
+    fn see_held(panes: &[&str]) -> Sighting {
+        Sighting {
+            hold_tracked: true,
+            ..see(panes)
         }
     }
 
@@ -333,5 +402,81 @@ mod tests {
         a.save(&begin(&["A", "B"], Direction::Older)).unwrap();
 
         assert!(b.load().is_none());
+    }
+
+    #[test]
+    fn tapping_releasing_and_tapping_again_starts_a_fresh_cycle() {
+        let tapped = Session::advance(None, see_held(&["A", "B", "C"]), Direction::Older, 5000)
+            .unwrap()
+            .released(5050);
+
+        let again = Session::advance(
+            Some(tapped),
+            see_held(&["B", "A", "C"]),
+            Direction::Older,
+            5100,
+        )
+        .unwrap();
+
+        assert_eq!(again.target(), "A");
+    }
+
+    #[test]
+    fn holding_the_modifier_keeps_one_cycle_across_a_long_pause() {
+        let first =
+            Session::advance(None, see_held(&["A", "B", "C"]), Direction::Older, 5000).unwrap();
+
+        let after_pause = Session::advance(
+            Some(first),
+            see_held(&["B", "A", "C"]),
+            Direction::Older,
+            5000 + 10 * IDLE_MILLIS,
+        )
+        .unwrap();
+
+        assert_eq!(after_pause.target(), "C");
+    }
+
+    #[test]
+    fn a_held_cycle_whose_watcher_vanished_expires_eventually() {
+        let first =
+            Session::advance(None, see_held(&["A", "B", "C"]), Direction::Older, 5000).unwrap();
+
+        let much_later = Session::advance(
+            Some(first),
+            see_held(&["B", "A", "C"]),
+            Direction::Older,
+            5000 + MAX_HOLD_MILLIS + 1,
+        )
+        .unwrap();
+
+        assert_eq!(much_later.target(), "A");
+    }
+
+    #[test]
+    fn a_released_cycle_keeps_owning_its_focus_events_only_briefly() {
+        let released = Session::advance(None, see_held(&["A", "B", "C"]), Direction::Older, 5000)
+            .unwrap()
+            .released(5100);
+
+        assert!(released.owns_focus("B", 5100 + RELEASE_GRACE_MILLIS));
+        assert!(!released.owns_focus("B", 5100 + RELEASE_GRACE_MILLIS + 1));
+    }
+
+    #[test]
+    fn releasing_ends_only_the_cycle_the_watcher_was_started_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Store::for_connection(dir.path(), None);
+        let session =
+            Session::advance(None, see_held(&["A", "B", "C"]), Direction::Older, 5000).unwrap();
+        store.save(&session).unwrap();
+
+        store.mark_released(4000, 5100).unwrap();
+        let after_stale_watcher = store.load().unwrap();
+        store.mark_released(session.started_at(), 5100).unwrap();
+        let after_own_watcher = store.load().unwrap();
+
+        assert!(after_stale_watcher.is_active(5200));
+        assert!(!after_own_watcher.is_active(5200));
     }
 }
