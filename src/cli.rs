@@ -40,4 +40,11 @@ pub enum Command {
     QuickFocusPreviousPane,
     /// Focus the most recently used agent without opening the navigator UI.
     QuickFocusPreviousAgent,
+    /// Step one pane further back through recently used panes (alt+tab).
+    CycleOlder,
+    /// Step one pane forward again through recently used panes (alt+shift+tab).
+    CycleNewer,
+    /// Internal: ends the cycle that began at the given time once Alt is released.
+    #[command(hide = true)]
+    CycleWatch { started_at: u64 },
 }

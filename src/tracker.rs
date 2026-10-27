@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use fs2::FileExt;
@@ -107,6 +107,58 @@ pub fn now_millis() -> u64 {
 /// lag is a wall-clock step backwards, not a delayed hook.
 const MAX_HOOK_LAG_MILLIS: u64 = 60_000;
 
+/// One MRU entry's `focused_at` as it was before an alt-tab cycle began.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryTime {
+    pub kind: MruKind,
+    pub id: String,
+    pub focused_at: u64,
+}
+
+pub fn snapshot_times() -> Vec<EntryTime> {
+    load_mru()
+        .into_iter()
+        .map(|e| EntryTime {
+            kind: e.kind,
+            id: e.id,
+            focused_at: e.focused_at,
+        })
+        .collect()
+}
+
+/// Re-time entries during an alt-tab cycle: everything in `baseline` gets its
+/// pre-cycle `focused_at` back and the `promoted` entries are stamped
+/// `promoted_at`, so history reads as if only the promoted ones were focused.
+pub fn restore_and_promote(
+    baseline: &[EntryTime],
+    promoted: &[(MruKind, &str)],
+    promoted_at: u64,
+) -> anyhow::Result<()> {
+    let path = mru_path();
+    let _lock = acquire_lock()?;
+    let mut entries = read_entries_newest_first(&path);
+    for entry in &mut entries {
+        if let Some(before) = baseline
+            .iter()
+            .find(|b| b.kind == entry.kind && b.id == entry.id)
+        {
+            entry.focused_at = before.focused_at;
+        }
+    }
+    let newest = entries.iter().map(|e| e.focused_at).max().unwrap_or(0);
+    let promoted_at = promoted_at.max(newest);
+    let is_promoted = |e: &MruEntry| {
+        promoted
+            .iter()
+            .any(|(kind, id)| *kind == e.kind && *id == e.id)
+    };
+    for entry in entries.iter_mut().filter(|e| is_promoted(e)) {
+        entry.focused_at = promoted_at;
+    }
+    entries.sort_by_key(|e| (std::cmp::Reverse(e.focused_at), !is_promoted(e)));
+    write_entries(&path, &entries)
+}
+
 /// Persist an observation to the MRU file.
 ///
 /// Uses a cross-process lock file (`mru.lock`) to serialize concurrent writes
@@ -115,11 +167,7 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
     let path = mru_path();
     let _lock = acquire_lock()?;
 
-    let mut entries: Vec<MruEntry> = fs::read_to_string(&path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default();
-    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+    let mut entries = read_entries_newest_first(&path);
 
     let FocusObservation {
         kind,
@@ -165,17 +213,29 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
 
     entries.truncate(300);
 
+    write_entries(&path, &entries)
+    // Lock released when `_lock` is dropped
+}
+
+fn read_entries_newest_first(path: &Path) -> Vec<MruEntry> {
+    let mut entries: Vec<MruEntry> = fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
+    entries
+}
+
+fn write_entries(path: &Path, entries: &[MruEntry]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     // Write to temp file then rename for atomicity.
     // If the process crashes mid-write, the original file is untouched.
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, serde_json::to_string_pretty(&entries)?)?;
-    fs::rename(&tmp_path, &path)?;
-
+    fs::write(&tmp_path, serde_json::to_string_pretty(entries)?)?;
+    fs::rename(&tmp_path, path)?;
     Ok(())
-    // Lock released when `_lock` is dropped
 }
 
 /// Load all MRU entries from the persistent state file.
@@ -401,6 +461,64 @@ mod tests {
             let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
             assert_eq!(ids, ["A", "B"]);
             assert_eq!(load_mru()[0].focused_at, now);
+        });
+    }
+
+    fn recorded_times() -> Vec<EntryTime> {
+        snapshot_times()
+    }
+
+    #[test]
+    fn promoting_keeps_skipped_stops_in_their_original_order_at_every_level() {
+        with_temp_dir(|_dir| {
+            for (kind, id, at) in [
+                (MruKind::Pane, "A", 10),
+                (MruKind::Pane, "B", 20),
+                (MruKind::Pane, "C", 30),
+                (MruKind::Workspace, "ws-a", 11),
+                (MruKind::Workspace, "ws-b", 21),
+                (MruKind::Workspace, "ws-c", 31),
+            ] {
+                record_observation(observation(kind, id, at)).unwrap();
+            }
+            let baseline = recorded_times();
+
+            restore_and_promote(
+                &baseline,
+                &[(MruKind::Pane, "B"), (MruKind::Workspace, "ws-b")],
+                100,
+            )
+            .unwrap();
+            restore_and_promote(
+                &baseline,
+                &[(MruKind::Pane, "A"), (MruKind::Workspace, "ws-a")],
+                200,
+            )
+            .unwrap();
+
+            let order = |kind: MruKind| -> Vec<String> {
+                load_mru()
+                    .into_iter()
+                    .filter(|e| e.kind == kind)
+                    .map(|e| e.id)
+                    .collect()
+            };
+            assert_eq!(order(MruKind::Pane), ["A", "C", "B"]);
+            assert_eq!(order(MruKind::Workspace), ["ws-a", "ws-c", "ws-b"]);
+        });
+    }
+
+    #[test]
+    fn promoting_after_the_clock_stepped_back_still_reaches_the_front() {
+        with_temp_dir(|_dir| {
+            let now = 10_000_000;
+            record_observation(observation(MruKind::Pane, "A", now)).unwrap();
+            record_observation(observation(MruKind::Pane, "B", now - 1)).unwrap();
+            let baseline = recorded_times();
+
+            restore_and_promote(&baseline, &[(MruKind::Pane, "B")], now - 5_000_000).unwrap();
+
+            assert_eq!(load_mru()[0].id, "B");
         });
     }
 

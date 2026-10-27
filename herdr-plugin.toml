@@ -86,6 +86,20 @@ description = "Jump to the most recently used agent without opening the navigato
 contexts = ["global", "workspace"]
 command = ["./target/release/herdr-recent-navigator", "quick-focus-previous-agent"]
 
+[[actions]]
+id = "cycle-older"
+title = "Cycle Panes: Older"
+description = "Step back through recently used panes, across workspaces (bind to alt+tab)"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-recent-navigator", "cycle-older"]
+
+[[actions]]
+id = "cycle-newer"
+title = "Cycle Panes: Newer"
+description = "Step forward again through recently used panes (bind to alt+shift+tab)"
+contexts = ["global", "workspace"]
+command = ["./target/release/herdr-recent-navigator", "cycle-newer"]
+
 [[events]]
 on = "workspace.focused"
 command = ["./target/release/herdr-recent-navigator", "track"]

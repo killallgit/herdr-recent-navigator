@@ -1,9 +1,12 @@
 mod app;
 mod cli;
+mod connection;
+mod cycle;
 mod data;
 mod format;
 mod ipc;
 mod models;
+mod modifier;
 mod mru;
 mod others;
 mod popup;
@@ -47,10 +50,14 @@ type RunInnerResult = Result<(
 fn popup_state() -> popup::PopupState {
     popup::PopupState::for_connection(
         &tracker::state_dir_or_default(),
-        std::env::var("HERDR_SOCKET_PATH")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .as_deref(),
+        connection::socket_path_from_env().as_deref(),
+    )
+}
+
+fn cycle_store() -> cycle::Store {
+    cycle::Store::for_connection(
+        &tracker::state_dir_or_default(),
+        connection::socket_path_from_env().as_deref(),
     )
 }
 
@@ -92,6 +99,14 @@ fn main() -> Result<()> {
     // ── Quick focus previous agent (no TUI) ──
     if let Some(CliCommand::QuickFocusPreviousAgent) = &cli.command {
         return handle_quick_focus_previous_agent();
+    }
+
+    // ── Cycle through recently used panes (no TUI) ──
+    match &cli.command {
+        Some(CliCommand::CycleOlder) => return handle_cycle(cycle::Direction::Older),
+        Some(CliCommand::CycleNewer) => return handle_cycle(cycle::Direction::Newer),
+        Some(CliCommand::CycleWatch { started_at }) => return handle_cycle_watch(*started_at),
+        _ => {}
     }
 
     // ── --pane-open mode — toggle the overlay pane ──
@@ -379,6 +394,25 @@ fn derive_active_context(
     }
 }
 
+/// True when the pane focused right now is one an active alt-tab cycle moved
+/// to. Any other focus means the user moved by hand, which ends the cycle.
+fn focus_is_from_active_cycle(now: u64) -> bool {
+    let store = cycle_store();
+    let Ok(_turn) = store.lock() else {
+        return false;
+    };
+    let Some(session) = store.load().filter(|s| s.is_owning(now)) else {
+        return false;
+    };
+    match ipc::fetch_focused_pane_info() {
+        Ok((pane_id, ..)) if !session.owns_focus(&pane_id, now) => {
+            store.clear();
+            false
+        }
+        _ => true,
+    }
+}
+
 /// Handle the `track` subcommand.
 ///
 /// Herdr guarantees `workspace.focused` events but may not fire
@@ -410,6 +444,9 @@ fn handle_track() -> Result<()> {
         .context("HERDR_PLUGIN_EVENT_JSON missing 'data' field")?;
 
     let event_observed_at = tracker::now_millis();
+    if focus_is_from_active_cycle(event_observed_at) {
+        return Ok(());
+    }
     let record_event = |kind, id: &str, workspace_id: &str| {
         tracker::record_observation(tracker::FocusObservation::new(
             kind,
@@ -603,6 +640,112 @@ fn handle_quick_focus_previous_pane() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Step through recently used panes like an OS app switcher.
+///
+/// A press within `cycle::IDLE_MILLIS` of the last one continues the same
+/// session over the pane order frozen when it began; the track hook ignores the
+/// focus events this causes, so the history is rewritten here instead.
+fn handle_cycle(direction: cycle::Direction) -> Result<()> {
+    let store = cycle_store();
+    let _turn = store.lock()?;
+    let now = tracker::now_millis();
+
+    let (nodes, focused) = ipc::fetch_all_nodes()?;
+    let live_mru = tracker::load_mru()
+        .into_iter()
+        .filter(|e| e.kind == tracker::MruKind::Pane)
+        .filter(|e| nodes.iter().any(|n| n.pane_id == e.id))
+        .map(|e| e.id)
+        .collect();
+    let sighting = cycle::Sighting {
+        live_mru,
+        focused_pane: focused.map(|pane| pane.pane_id),
+        baseline: tracker::snapshot_times(),
+        hold_tracked: modifier::alt_held() == Some(true),
+    };
+    let previous = store.load();
+    let starts_new_cycle = !previous.as_ref().is_some_and(|s| s.is_active(now));
+    let Some(session) = cycle::Session::advance(previous, sighting, direction, now) else {
+        log::warn!("cycle: no panes in MRU history");
+        return Ok(());
+    };
+
+    let target = session.target();
+    // Saved before focusing so the track hook, which takes the same lock, can
+    // tell the resulting focus events are ours.
+    store.save(&session)?;
+    log::info!("cycle: focusing pane {target}");
+    if let Err(e) = ipc::focus_pane(target) {
+        store.clear();
+        return Err(e);
+    }
+    if let Some(node) = nodes.iter().find(|n| n.pane_id == target) {
+        record_cycle_stop(node, session.baseline(), now)?;
+    }
+    if starts_new_cycle && session.is_hold_tracked() {
+        spawn_release_watcher(session.started_at());
+    }
+    Ok(())
+}
+
+/// Ends the cycle that began at `started_at` as soon as Alt is released, which
+/// is what separates "tap, let go, tap" from "hold Alt and keep pressing Tab".
+fn handle_cycle_watch(started_at: u64) -> Result<()> {
+    const POLL: std::time::Duration = std::time::Duration::from_millis(15);
+    let give_up_at =
+        std::time::Instant::now() + std::time::Duration::from_millis(cycle::MAX_HOLD_MILLIS);
+    while modifier::alt_held() == Some(true) && std::time::Instant::now() < give_up_at {
+        std::thread::sleep(POLL);
+    }
+    cycle_store().mark_released(started_at, tracker::now_millis())
+}
+
+fn spawn_release_watcher(started_at: u64) {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let watcher = ProcessCommand::new(exe)
+        .args(["cycle-watch", &started_at.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(e) = watcher {
+        log::warn!("cycle: could not start the release watcher: {e}");
+    }
+}
+
+fn record_cycle_stop(
+    node: &models::NavigationNode,
+    baseline: &[tracker::EntryTime],
+    now: u64,
+) -> Result<()> {
+    let record = |kind, id: &str, name: &str| {
+        tracker::record_observation(
+            tracker::FocusObservation::new(kind, id, &node.workspace_id, now)
+                .named(Some(name.to_string()), Some(node.workspace_name.clone())),
+        )
+    };
+    record(tracker::MruKind::Tab, &node.tab_id, &node.tab_name)?;
+    record(
+        tracker::MruKind::Workspace,
+        &node.workspace_id,
+        &node.workspace_name,
+    )?;
+    tracker::restore_and_promote(
+        baseline,
+        &[
+            (tracker::MruKind::Pane, &node.pane_id),
+            (tracker::MruKind::Tab, &node.tab_id),
+            (tracker::MruKind::Workspace, &node.workspace_id),
+        ],
+        now,
+    )
 }
 
 fn previous_agent_pane_id(
