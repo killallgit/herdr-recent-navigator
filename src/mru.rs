@@ -41,6 +41,10 @@ pub struct BuildOptions<'a> {
     pub self_pane_id: Option<&'a str>,
     /// Pane runtime state for the All tab (cmd/ssh/cwd).
     pub others: &'a HashMap<String, PaneOthers>,
+    /// Captured pane buffers searched by the All tab's content filters.
+    pub contents: &'a HashMap<String, String>,
+    /// Process and listening-port snapshot behind the `pid ` / `port ` filters.
+    pub locator: &'a crate::models::PidLocator,
     pub agent_sort: AgentSort,
 }
 
@@ -92,23 +96,11 @@ pub fn build_display_list(
             let merged_tab_ts = merge_tab_ts(&all, opts.tab_ts, opts.pane_ts);
             build_tab_items(&all, &merged_tab_ts, opts.active_tab_id)
         }
-        CategoryTab::Agents => build_agent_items(
-            &all,
-            opts.pane_ts,
-            opts.active_pane_id,
-            opts.self_pane_id,
-            opts.agent_sort,
-        ),
+        CategoryTab::Agents => build_agent_items(&all, opts),
         CategoryTab::Panes => {
             build_pane_items(&all, opts.pane_ts, opts.active_pane_id, opts.self_pane_id)
         }
-        CategoryTab::All => build_other_items(
-            &all,
-            opts.pane_ts,
-            opts.active_pane_id,
-            opts.self_pane_id,
-            opts.others,
-        ),
+        CategoryTab::All => build_other_items(&all, opts),
     }
 }
 
@@ -266,19 +258,13 @@ fn build_tab_items(
 /// `Grouped` keeps herdr's `pane list` order (workspace → tab → layout), which
 /// is what the sidebar shows in "grouped" mode; `Priority` is the sidebar's
 /// stable sort on top of that (status rank, then latest status change).
-fn build_agent_items(
-    nodes: &[&NavigationNode],
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
-    sort: AgentSort,
-) -> Vec<DisplayItem> {
+fn build_agent_items(nodes: &[&NavigationNode], opts: &BuildOptions) -> Vec<DisplayItem> {
     let mut agents: Vec<&NavigationNode> = nodes
         .iter()
         .copied()
-        .filter(|n| n.agent_id.is_some() && exclude_pane(n, exclude_pane_id, self_pane_id))
+        .filter(|n| n.agent_id.is_some() && exclude_pane(n, opts.active_pane_id, opts.self_pane_id))
         .collect();
-    if sort == AgentSort::Priority {
+    if opts.agent_sort == AgentSort::Priority {
         agents.sort_by_key(|n| {
             (
                 Reverse(n.agent_status.priority()),
@@ -289,7 +275,7 @@ fn build_agent_items(
     let mut items: Vec<DisplayItem> = agents
         .iter()
         .map(|n| {
-            let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
+            let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
             DisplayItem::Agent {
                 agent_id: n.agent_id.clone().unwrap_or_default(),
                 status: n.agent_status.clone(),
@@ -300,7 +286,7 @@ fn build_agent_items(
             }
         })
         .collect();
-    if sort == AgentSort::Recent {
+    if opts.agent_sort == AgentSort::Recent {
         mru_sort(&mut items);
     }
     items
@@ -340,25 +326,19 @@ fn build_pane_items(
 /// pane's MRU timestamp and are ordered by source priority within a pane.
 /// The Context column locates the record: connected host (`ssh`), the pane's
 /// cwd (`cmd`), or `-` (`cwd` — the detail already is the cwd).
-fn build_other_items(
-    nodes: &[&NavigationNode],
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
-    others: &HashMap<String, PaneOthers>,
-) -> Vec<DisplayItem> {
+fn build_other_items(nodes: &[&NavigationNode], opts: &BuildOptions) -> Vec<DisplayItem> {
     let mut items: Vec<DisplayItem> = Vec::new();
     for n in nodes {
         if n.agent_id.is_some() {
             continue;
         }
-        if !exclude_pane(n, exclude_pane_id, self_pane_id) {
+        if !exclude_pane(n, opts.active_pane_id, opts.self_pane_id) {
             continue;
         }
-        let Some(o) = others.get(&n.pane_id) else {
+        let Some(o) = opts.others.get(&n.pane_id) else {
             continue;
         };
-        let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
+        let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
         let pane_name = n.pane_name.clone().unwrap_or_else(|| n.pane_id.clone());
 
         let mut push = |source: crate::models::OtherSource, detail: &str, context: String| {
@@ -459,11 +439,7 @@ fn first_content_line(content: &str) -> String {
 
 pub fn build_content_items(
     nodes: &[NavigationNode],
-    contents: &HashMap<String, String>,
-    others: &HashMap<String, PaneOthers>,
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
+    opts: &BuildOptions,
     query: &str,
 ) -> Vec<DisplayItem> {
     let mut items = Vec::new();
@@ -471,17 +447,17 @@ pub fn build_content_items(
         if n.agent_id.is_some() {
             continue;
         }
-        if !exclude_pane(&n, exclude_pane_id, self_pane_id) {
+        if !exclude_pane(&n, opts.active_pane_id, opts.self_pane_id) {
             continue;
         }
-        let Some(content) = contents.get(&n.pane_id) else {
+        let Some(content) = opts.contents.get(&n.pane_id) else {
             continue;
         };
         let Some(detail) = crate::others::content_excerpt(content, query) else {
             continue;
         };
         let title = n.pane_name.as_deref().unwrap_or_default();
-        let state = others.get(&n.pane_id);
+        let state = opts.others.get(&n.pane_id);
         let (editing_file, target) = content_row_meta(title, state);
         let context = if editing_file {
             match &target {
@@ -501,7 +477,7 @@ pub fn build_content_items(
                 .unwrap_or("-")
                 .to_string()
         };
-        let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
+        let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
         items.push(DisplayItem::Other {
             pane_id: n.pane_id.clone(),
             pane_name: n.pane_name.clone().unwrap_or_else(|| n.pane_id.clone()),
@@ -528,11 +504,7 @@ pub fn build_content_items(
 /// content line (`term`), since there is no match to excerpt around.
 fn build_content_source_items(
     nodes: &[NavigationNode],
-    contents: &HashMap<String, String>,
-    others: &HashMap<String, PaneOthers>,
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
+    opts: &BuildOptions,
     src: crate::models::OtherSource,
 ) -> Vec<DisplayItem> {
     let mut items = Vec::new();
@@ -540,14 +512,14 @@ fn build_content_source_items(
         if n.agent_id.is_some() {
             continue;
         }
-        if !exclude_pane(&n, exclude_pane_id, self_pane_id) {
+        if !exclude_pane(&n, opts.active_pane_id, opts.self_pane_id) {
             continue;
         }
-        let Some(content) = contents.get(&n.pane_id) else {
+        let Some(content) = opts.contents.get(&n.pane_id) else {
             continue;
         };
         let title = n.pane_name.as_deref().unwrap_or_default();
-        let state = others.get(&n.pane_id);
+        let state = opts.others.get(&n.pane_id);
         let (editing_file, target) = content_row_meta(title, state);
         let matches_src = if src == crate::models::OtherSource::File {
             editing_file
@@ -572,7 +544,7 @@ fn build_content_source_items(
             // `term` rows are located by the pane's cwd.
             cwd.unwrap_or("-").to_string()
         };
-        let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
+        let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
         items.push(DisplayItem::Other {
             pane_id: n.pane_id.clone(),
             pane_name: n.pane_name.clone().unwrap_or_else(|| n.pane_id.clone()),
@@ -650,27 +622,24 @@ fn pid_query_node<'a>(
 /// walking its parent chain). When no pane owns N the row says why instead
 /// of going silently empty — process gone, snapshot unavailable, or known
 /// but not in any pane (a hint row, since there is nothing to jump to).
-#[allow(clippy::too_many_arguments)]
 fn build_pid_items(
     nodes: &[NavigationNode],
-    others: &HashMap<String, PaneOthers>,
-    locator: &crate::models::PidLocator,
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
+    opts: &BuildOptions,
     needle: &str,
 ) -> Vec<DisplayItem> {
     let Ok(target) = needle.trim().parse::<u32>() else {
         return Vec::new();
     };
-    if let Some(pane_id) = pane_owning_pid(target, others, locator) {
+    if let Some(pane_id) = pane_owning_pid(target, opts.others, opts.locator) {
         // A pane owns it — but honor the usual exclusions; a hidden pane
         // (the navigator's own, the active one) simply lists nothing.
-        let Some(n) = pid_query_node(nodes, &pane_id, exclude_pane_id, self_pane_id) else {
+        let Some(n) = pid_query_node(nodes, &pane_id, opts.active_pane_id, opts.self_pane_id)
+        else {
             return Vec::new();
         };
-        let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
-        let detail = locator
+        let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
+        let detail = opts
+            .locator
             .procs
             .get(&target)
             .map(|p| p.command.clone())
@@ -688,7 +657,7 @@ fn build_pid_items(
     }
 
     // No pane owns it — explain instead of an unexplained empty list.
-    if locator.procs.is_empty() {
+    if opts.locator.procs.is_empty() {
         return vec![hint_row(
             crate::models::OtherSource::Pid,
             &format!("pid {target}"),
@@ -696,7 +665,7 @@ fn build_pid_items(
             "",
         )];
     }
-    if !locator.procs.contains_key(&target) {
+    if !opts.locator.procs.contains_key(&target) {
         return vec![hint_row(
             crate::models::OtherSource::Pid,
             &format!("pid {target}"),
@@ -704,12 +673,13 @@ fn build_pid_items(
             "",
         )];
     }
-    if others.is_empty() {
+    if opts.others.is_empty() {
         // No pane shell pids fetched yet — attribution may still arrive with
         // the next refresh, so "not in any pane" is not established.
         return Vec::new();
     }
-    let detail = locator
+    let detail = opts
+        .locator
         .procs
         .get(&target)
         .map(|p| p.command.clone())
@@ -726,20 +696,16 @@ fn build_pid_items(
 /// owner's process tree reaches a visible pane. `None` covers both "owner
 /// outside every pane" (caller may hint about it) and "owner's pane hidden
 /// by exclusions" (caller stays silent).
-#[allow(clippy::too_many_arguments)]
 fn attributed_port_row(
     owner: &crate::models::PortOwner,
     nodes: &[NavigationNode],
-    others: &HashMap<String, PaneOthers>,
-    locator: &crate::models::PidLocator,
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
+    opts: &BuildOptions,
 ) -> Option<DisplayItem> {
-    let pane_id = pane_owning_pid(owner.pid, others, locator)?;
-    let n = pid_query_node(nodes, &pane_id, exclude_pane_id, self_pane_id)?;
-    let ts = ts_map.get(&n.pane_id).copied().unwrap_or(0);
-    let context = locator
+    let pane_id = pane_owning_pid(owner.pid, opts.others, opts.locator)?;
+    let n = pid_query_node(nodes, &pane_id, opts.active_pane_id, opts.self_pane_id)?;
+    let ts = opts.pane_ts.get(&n.pane_id).copied().unwrap_or(0);
+    let context = opts
+        .locator
         .procs
         .get(&owner.pid)
         .map(|p| p.command.clone())
@@ -764,33 +730,20 @@ fn attributed_port_row(
 /// this port", never "the lookup found something it cannot show". An empty
 /// needle lists every pane-mapped port (the "who is serving" overview) and
 /// emits no hints — unattributed system listeners would flood it.
-#[allow(clippy::too_many_arguments)]
 fn build_port_items(
     nodes: &[NavigationNode],
-    others: &HashMap<String, PaneOthers>,
-    locator: &crate::models::PidLocator,
-    ts_map: &HashMap<String, u64>,
-    exclude_pane_id: Option<&str>,
-    self_pane_id: Option<&str>,
+    opts: &BuildOptions,
     needle: &str,
 ) -> Vec<DisplayItem> {
     let needle = needle.trim();
     let Some(port) = needle.parse::<u16>().ok() else {
         if needle.is_empty() {
-            let mut ports: Vec<u16> = locator.listeners.keys().copied().collect();
+            let mut ports: Vec<u16> = opts.locator.listeners.keys().copied().collect();
             ports.sort_unstable();
             let mut items = Vec::new();
             for port in ports {
-                for owner in locator.listeners.get(&port).into_iter().flatten() {
-                    if let Some(row) = attributed_port_row(
-                        owner,
-                        nodes,
-                        others,
-                        locator,
-                        ts_map,
-                        exclude_pane_id,
-                        self_pane_id,
-                    ) {
+                for owner in opts.locator.listeners.get(&port).into_iter().flatten() {
+                    if let Some(row) = attributed_port_row(owner, nodes, opts) {
                         items.push(row);
                     }
                 }
@@ -802,7 +755,7 @@ fn build_port_items(
     };
 
     // Explicit port: pane rows first, then hints for anything unattributed.
-    if locator.listeners.is_empty() {
+    if opts.locator.listeners.is_empty() {
         return vec![hint_row(
             crate::models::OtherSource::Port,
             &format!("port {port}"),
@@ -812,23 +765,16 @@ fn build_port_items(
     }
     let mut items = Vec::new();
     let mut unattributed: Vec<&crate::models::PortOwner> = Vec::new();
-    for owner in locator.listeners.get(&port).into_iter().flatten() {
-        match attributed_port_row(
-            owner,
-            nodes,
-            others,
-            locator,
-            ts_map,
-            exclude_pane_id,
-            self_pane_id,
-        ) {
+    for owner in opts.locator.listeners.get(&port).into_iter().flatten() {
+        match attributed_port_row(owner, nodes, opts) {
             Some(row) => items.push(row),
             None => unattributed.push(owner),
         }
     }
-    if !unattributed.is_empty() && !others.is_empty() {
+    if !unattributed.is_empty() && !opts.others.is_empty() {
         for owner in &unattributed {
-            let command = locator
+            let command = opts
+                .locator
                 .procs
                 .get(&owner.pid)
                 .map(|p| p.command.clone())
@@ -872,9 +818,6 @@ fn build_port_items(
 /// matches, so their ranked query is always empty — no fuzzy re-ranking.
 pub fn build_others_base(
     nodes: &[NavigationNode],
-    contents: &HashMap<String, String>,
-    others: &HashMap<String, PaneOthers>,
-    locator: &crate::models::PidLocator,
     opts: &BuildOptions,
     query: &str,
 ) -> (String, Vec<DisplayItem>) {
@@ -884,15 +827,7 @@ pub fn build_others_base(
         if n.is_empty() {
             Vec::new()
         } else {
-            build_content_items(
-                nodes,
-                contents,
-                others,
-                opts.pane_ts,
-                opts.active_pane_id,
-                opts.self_pane_id,
-                n,
-            )
+            build_content_items(nodes, opts, n)
         }
     };
     let by_source =
@@ -910,15 +845,7 @@ pub fn build_others_base(
             crate::models::OtherSource::File | crate::models::OtherSource::Terminal
                 if needle.is_empty() =>
             {
-                build_content_source_items(
-                    nodes,
-                    contents,
-                    others,
-                    opts.pane_ts,
-                    opts.active_pane_id,
-                    opts.self_pane_id,
-                    src,
-                )
+                build_content_source_items(nodes, opts, src)
             }
             crate::models::OtherSource::File | crate::models::OtherSource::Terminal => {
                 by_source(content_rows(needle), src)
@@ -927,24 +854,8 @@ pub fn build_others_base(
         },
         // `port ` / `pid ` resolve against the locator snapshot: exact rows,
         // no fuzzy stage.
-        Some(crate::models::OthersFilter::Port) => build_port_items(
-            nodes,
-            others,
-            locator,
-            opts.pane_ts,
-            opts.active_pane_id,
-            opts.self_pane_id,
-            needle,
-        ),
-        Some(crate::models::OthersFilter::Pid) => build_pid_items(
-            nodes,
-            others,
-            locator,
-            opts.pane_ts,
-            opts.active_pane_id,
-            opts.self_pane_id,
-            needle,
-        ),
+        Some(crate::models::OthersFilter::Port) => build_port_items(nodes, opts, needle),
+        Some(crate::models::OthersFilter::Pid) => build_pid_items(nodes, opts, needle),
         // `ws ` / `tab ` / `pane ` swap the list to the matching dimension's
         // entities, so typing a name fuzzy-filters down to it directly.
         Some(crate::models::OthersFilter::Workspace) => {
@@ -1163,6 +1074,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Workspaces);
@@ -1201,6 +1114,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Workspaces);
@@ -1260,6 +1175,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let names: Vec<String> = build_display_list(&nodes, &opts, &CategoryTab::Workspaces)
@@ -1284,6 +1201,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Agents);
@@ -1327,6 +1246,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Grouped,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Agents);
@@ -1369,6 +1290,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Priority,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Agents);
@@ -1390,6 +1313,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Panes);
@@ -1411,6 +1336,8 @@ mod tests {
             active_tab_id: Some("tab-pane-1"),
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Tabs);
@@ -1449,6 +1376,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Panes);
@@ -1476,6 +1405,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::Agents);
@@ -1507,6 +1438,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &empty_others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let a = build_display_list(&nodes, &opts, &CategoryTab::Workspaces);
@@ -1605,6 +1538,28 @@ mod tests {
         crate::models::PidLocator::default()
     }
 
+    fn content_opts<'a>(
+        contents: &'a HashMap<String, String>,
+        others: &'a HashMap<String, PaneOthers>,
+        pane_ts: &'a HashMap<String, u64>,
+        locator: &'a crate::models::PidLocator,
+        self_pane_id: Option<&'a str>,
+    ) -> BuildOptions<'a> {
+        BuildOptions {
+            pane_ts,
+            tab_ts: pane_ts,
+            ws_ts: pane_ts,
+            active_workspace_id: None,
+            active_pane_id: None,
+            active_tab_id: None,
+            self_pane_id,
+            others,
+            contents,
+            locator,
+            agent_sort: AgentSort::Recent,
+        }
+    }
+
     /// All emits one record per (pane × source); agent panes and login
     /// shells are excluded; records group by pane in priority order.
     #[test]
@@ -1621,6 +1576,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::All);
@@ -1672,6 +1629,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &HashMap::new(),
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let items = build_display_list(&nodes, &opts, &CategoryTab::All);
@@ -1734,15 +1693,9 @@ mod tests {
             },
         );
 
-        let items = build_content_items(
-            &nodes,
-            &contents,
-            &others,
-            &empty,
-            None,
-            Some("pane-5"),
-            "deployservice",
-        );
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, Some("pane-5"));
+        let items = build_content_items(&nodes, &opts, "deployservice");
         assert_eq!(items.len(), 1);
         let item = &items[0];
         match item {
@@ -1769,7 +1722,9 @@ mod tests {
             "pane-5".to_string(),
             "deploy failed: connection refused\n".to_string(),
         );
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, None, "deploy");
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let items = build_content_items(&nodes, &opts, "deploy");
         let pane5 = items
             .iter()
             .find(|it| matches!(it, DisplayItem::Other { pane_id, .. } if pane_id == "pane-5"))
@@ -1783,27 +1738,16 @@ mod tests {
         );
 
         // No match → empty list; agent/content never searched.
-        let items = build_content_items(
-            &nodes,
-            &contents,
-            &others,
-            &empty,
-            None,
-            Some("pane-5"),
-            "zzz-no",
-        );
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, Some("pane-5"));
+        let items = build_content_items(&nodes, &opts, "zzz-no");
         assert!(items.is_empty());
 
         // No cached content for any pane → nothing to match.
-        let items = build_content_items(
-            &nodes,
-            &HashMap::new(),
-            &others,
-            &empty,
-            None,
-            Some("pane-5"),
-            "deployservice",
-        );
+        let locator = no_locator();
+        let no_contents = HashMap::new();
+        let opts = content_opts(&no_contents, &others, &empty, &locator, Some("pane-5"));
+        let items = build_content_items(&nodes, &opts, "deployservice");
         assert!(items.is_empty());
     }
 
@@ -1825,7 +1769,9 @@ mod tests {
                 shell_pid: None,
             },
         );
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, None, "deploy");
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let items = build_content_items(&nodes, &opts, "deploy");
         assert_eq!(items.len(), 1);
         match &items[0] {
             DisplayItem::Other {
@@ -1848,7 +1794,9 @@ mod tests {
             },
         );
         contents.insert("pane-5".to_string(), "term output deploy\n".to_string());
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, None, "deploy");
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let items = build_content_items(&nodes, &opts, "deploy");
         let pane5 = items
             .iter()
             .find(|it| matches!(it, DisplayItem::Other { pane_id, .. } if pane_id == "pane-5"))
@@ -1895,7 +1843,9 @@ mod tests {
                 shell_pid: None,
             },
         );
-        let items = build_content_items(&nodes, &contents, &others, &empty, None, None, "token");
+        let locator = no_locator();
+        let opts = content_opts(&contents, &others, &empty, &locator, None);
+        let items = build_content_items(&nodes, &opts, "token");
         assert_eq!(items.len(), 1);
         assert_eq!(
             match &items[0] {
@@ -1928,6 +1878,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &contents,
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let is_source = |items: &[DisplayItem], src: crate::models::OtherSource| {
@@ -1937,8 +1889,7 @@ mod tests {
         };
 
         // Plain query: state records AND the buffer match are both present.
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "deploy");
+        let (q, items) = build_others_base(&nodes, &opts, "deploy");
         assert_eq!(q, "deploy");
         assert!(
             is_source(&items, crate::models::OtherSource::Ssh),
@@ -1950,8 +1901,7 @@ mod tests {
         );
 
         // Leading `.`: buffer content only.
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, ".deploy");
+        let (q, items) = build_others_base(&nodes, &opts, ".deploy");
         assert_eq!(q, "deploy");
         assert!(is_source(&items, crate::models::OtherSource::Terminal));
         assert!(
@@ -1960,12 +1910,12 @@ mod tests {
         );
 
         // Empty query: state records alone (no needle, no excerpts).
-        let (q, items) = build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "");
+        let (q, items) = build_others_base(&nodes, &opts, "");
         assert_eq!(q, "");
         assert_eq!(items.len(), 4, "ssh+cmd+cwd of pane-4, cwd of pane-5");
 
         // Bare `.`: empty needle, nothing to show.
-        let (q, items) = build_others_base(&nodes, &contents, &others, &no_locator(), &opts, ".");
+        let (q, items) = build_others_base(&nodes, &opts, ".");
         assert_eq!(q, "");
         assert!(items.is_empty());
     }
@@ -2001,6 +1951,8 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &contents,
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
         let sources = |items: &[DisplayItem]| -> Vec<crate::models::OtherSource> {
@@ -2014,39 +1966,23 @@ mod tests {
         };
 
         // `cmd ` with no needle: every cmd row, nothing else.
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "cmd ");
+        let (q, items) = build_others_base(&nodes, &opts, "cmd ");
         assert_eq!(q, "");
         assert_eq!(sources(&items), vec![crate::models::OtherSource::Cmd]);
 
         // `ssh deploy`: ssh rows only, ranked by the remaining text.
-        let (q, items) = build_others_base(
-            &nodes,
-            &contents,
-            &others,
-            &no_locator(),
-            &opts,
-            "ssh deploy",
-        );
+        let (q, items) = build_others_base(&nodes, &opts, "ssh deploy");
         assert_eq!(q, "deploy");
         assert_eq!(sources(&items), vec![crate::models::OtherSource::Ssh]);
 
         // `file deploy`: content match typed `file`, no state rows.
-        let (q, items) = build_others_base(
-            &nodes,
-            &contents,
-            &others,
-            &no_locator(),
-            &opts,
-            "file deploy",
-        );
+        let (q, items) = build_others_base(&nodes, &opts, "file deploy");
         assert_eq!(q, "deploy");
         assert_eq!(sources(&items), vec![crate::models::OtherSource::File]);
 
         // `file ` with no needle: every file-editing pane lists, detail falls
         // back to the edited path (no match to excerpt around).
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "file ");
+        let (q, items) = build_others_base(&nodes, &opts, "file ");
         assert_eq!(q, "");
         assert_eq!(sources(&items), vec![crate::models::OtherSource::File]);
         match &items[0] {
@@ -2065,12 +2001,16 @@ mod tests {
 
         // `term ` with no needle: terminal-output panes list, detail falls
         // back to the first content line and context to the pane's cwd.
-        contents.insert(
+        let mut term_contents = contents.clone();
+        term_contents.insert(
             "pane-5".to_string(),
             "  \nls: No such file or directory\n".to_string(),
         );
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "term ");
+        let opts = BuildOptions {
+            contents: &term_contents,
+            ..opts
+        };
+        let (q, items) = build_others_base(&nodes, &opts, "term ");
         assert_eq!(q, "");
         assert_eq!(sources(&items), vec![crate::models::OtherSource::Terminal]);
         match &items[0] {
@@ -2106,11 +2046,13 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &contents,
+            locator: &no_locator(),
             agent_sort: AgentSort::Recent,
         };
 
         // `ws ` (empty needle): the workspace list.
-        let (q, items) = build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "ws ");
+        let (q, items) = build_others_base(&nodes, &opts, "ws ");
         assert_eq!(q, "");
         let names: Vec<&str> = items
             .iter()
@@ -2130,16 +2072,14 @@ mod tests {
         );
 
         // `tab ` (empty needle): the tab list.
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "tab ");
+        let (q, items) = build_others_base(&nodes, &opts, "tab ");
         assert_eq!(q, "");
         assert!(!items.is_empty());
         assert!(items.iter().all(|it| matches!(it, DisplayItem::Tab { .. })));
 
         // Fuzzy-filter the two lists with a needle (ranked_query is consumed
         // by search_display_items, exactly as in the app event loop).
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "ws auth");
+        let (q, items) = build_others_base(&nodes, &opts, "ws auth");
         assert_eq!(q, "auth");
         let ranked = search_display_items(&items, &q);
         let names: Vec<&str> = ranked
@@ -2151,8 +2091,7 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["Auth-Service"]);
 
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "tab prod");
+        let (q, items) = build_others_base(&nodes, &opts, "tab prod");
         assert_eq!(q, "prod");
         let ranked = search_display_items(&items, &q);
         let names: Vec<&str> = ranked
@@ -2164,14 +2103,7 @@ mod tests {
             .collect();
         assert_eq!(names, vec!["Prod"]);
 
-        let (q, items) = build_others_base(
-            &nodes,
-            &contents,
-            &others,
-            &no_locator(),
-            &opts,
-            "pane pane-4",
-        );
+        let (q, items) = build_others_base(&nodes, &opts, "pane pane-4");
         assert_eq!(q, "pane-4");
         let ranked = search_display_items(&items, &q);
         let names: Vec<&str> = ranked
@@ -2184,20 +2116,11 @@ mod tests {
         assert_eq!(names, vec!["pane-4"]);
 
         // No workspace/tab/pane matches the text: empty result.
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "ws nope");
+        let (q, items) = build_others_base(&nodes, &opts, "ws nope");
         assert!(search_display_items(&items, &q).is_empty());
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "tab nope");
+        let (q, items) = build_others_base(&nodes, &opts, "tab nope");
         assert!(search_display_items(&items, &q).is_empty());
-        let (q, items) = build_others_base(
-            &nodes,
-            &contents,
-            &others,
-            &no_locator(),
-            &opts,
-            "pane nope",
-        );
+        let (q, items) = build_others_base(&nodes, &opts, "pane nope");
         assert!(search_display_items(&items, &q).is_empty());
     }
 
@@ -2221,10 +2144,12 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &contents,
+            locator: &locator,
         };
 
         // pid 500 = vite, a descendant of pane-4's shell: walk finds pane-4.
-        let (q, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "pid 500");
+        let (q, items) = build_others_base(&nodes, &opts, "pid 500");
         assert_eq!(q, "");
         assert_eq!(items.len(), 1);
         match &items[0] {
@@ -2244,32 +2169,30 @@ mod tests {
         }
 
         // A pane shell pid matches exactly.
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "pid 410");
+        let (_, items) = build_others_base(&nodes, &opts, "pid 410");
         assert_eq!(items.len(), 1);
         assert!(matches!(&items[0], DisplayItem::Other { pane_id, .. } if pane_id == "pane-5"));
 
         // Unknown pid, non-numeric, empty: hint or nothing, never a pane row.
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "pid 999");
+        let (_, items) = build_others_base(&nodes, &opts, "pid 999");
         assert_eq!(items.len(), 1);
         assert!(
             matches!(&items[0], DisplayItem::Hint { reason, .. } if reason == "no such process")
         );
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "pid 100");
+        let (_, items) = build_others_base(&nodes, &opts, "pid 100");
         assert!(
             matches!(&items[0], DisplayItem::Hint { reason, .. } if reason == "no such process")
         );
         for needle in ["pid vite", "pid "] {
             assert!(
-                build_others_base(&nodes, &contents, &others, &locator, &opts, needle)
-                    .1
-                    .is_empty(),
+                build_others_base(&nodes, &opts, needle).1.is_empty(),
                 "no rows expected for {needle:?}"
             );
         }
 
         // Known pid with no pane behind it (reparented to launchd): a hint
         // row naming the command, not an empty list.
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "pid 600");
+        let (_, items) = build_others_base(&nodes, &opts, "pid 600");
         assert_eq!(items.len(), 1);
         match &items[0] {
             DisplayItem::Hint {
@@ -2286,8 +2209,12 @@ mod tests {
         }
 
         // Empty locator: the snapshot hint, so a broken ps/lsof is visible.
-        let (_, items) =
-            build_others_base(&nodes, &contents, &others, &no_locator(), &opts, "pid 600");
+        let empty_locator = no_locator();
+        let opts_empty = BuildOptions {
+            locator: &empty_locator,
+            ..opts
+        };
+        let (_, items) = build_others_base(&nodes, &opts_empty, "pid 600");
         assert!(matches!(
             &items[0],
             DisplayItem::Hint { reason, .. } if reason == "ps/lsof unavailable"
@@ -2304,9 +2231,11 @@ mod tests {
             active_tab_id: None,
             self_pane_id: Some("pane-4"),
             others: &others,
+            contents: &contents,
+            locator: &locator,
         };
         assert!(
-            build_others_base(&nodes, &contents, &others, &locator, &opts_self, "pid 500")
+            build_others_base(&nodes, &opts_self, "pid 500")
                 .1
                 .is_empty()
         );
@@ -2332,10 +2261,11 @@ mod tests {
             active_tab_id: None,
             self_pane_id: None,
             others: &others,
+            contents: &contents,
+            locator: &locator,
         };
 
-        let (q, items) =
-            build_others_base(&nodes, &contents, &others, &locator, &opts, "port 3000");
+        let (q, items) = build_others_base(&nodes, &opts, "port 3000");
         assert_eq!(q, "");
         assert_eq!(items.len(), 1);
         match &items[0] {
@@ -2356,7 +2286,7 @@ mod tests {
 
         // Port 22 is owned by pid 1, outside every pane: a dim hint row with
         // the owner command, not an empty list.
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "port 22");
+        let (_, items) = build_others_base(&nodes, &opts, "port 22");
         assert_eq!(items.len(), 1);
         match &items[0] {
             DisplayItem::Hint {
@@ -2376,8 +2306,7 @@ mod tests {
 
         // The orphaned-server scenario: port 4321's owner reparented to
         // launchd surfaces as a hint naming the command.
-        let (_, items) =
-            build_others_base(&nodes, &contents, &others, &locator, &opts, "port 4321");
+        let (_, items) = build_others_base(&nodes, &opts, "port 4321");
         assert_eq!(items.len(), 1);
         assert!(matches!(
             &items[0],
@@ -2388,8 +2317,7 @@ mod tests {
         ));
 
         // No listener at all on the queried port: a hint says so.
-        let (_, items) =
-            build_others_base(&nodes, &contents, &others, &locator, &opts, "port 9999");
+        let (_, items) = build_others_base(&nodes, &opts, "port 9999");
         assert!(matches!(
             &items[0],
             DisplayItem::Hint { detail, reason, .. }
@@ -2412,7 +2340,11 @@ mod tests {
                 },
             ],
         );
-        let (_, items) = build_others_base(&nodes, &contents, &others, &mixed, &opts, "port 8080");
+        let opts_mixed = BuildOptions {
+            locator: &mixed,
+            ..opts
+        };
+        let (_, items) = build_others_base(&nodes, &opts_mixed, "port 8080");
         assert_eq!(items.len(), 2);
         assert!(matches!(
             &items[0],
@@ -2427,25 +2359,19 @@ mod tests {
 
         // While the per-pane shell pids are still loading, unattributed
         // owners stay silent — "not in any pane" is not established yet.
-        let (_, items) = build_others_base(
-            &nodes,
-            &contents,
-            &HashMap::new(),
-            &locator,
-            &opts,
-            "port 4321",
-        );
+        let no_others = HashMap::new();
+        let opts_loading = BuildOptions {
+            others: &no_others,
+            ..opts
+        };
+        let (_, items) = build_others_base(&nodes, &opts_loading, "port 4321");
         assert!(items.is_empty());
 
         // Non-numeric needle: no rows.
-        assert!(
-            build_others_base(&nodes, &contents, &others, &locator, &opts, "port http")
-                .1
-                .is_empty()
-        );
+        assert!(build_others_base(&nodes, &opts, "port http").1.is_empty());
 
         // Empty needle: every pane-mapped port lists — :3000 but not :22/:4321.
-        let (_, items) = build_others_base(&nodes, &contents, &others, &locator, &opts, "port ");
+        let (_, items) = build_others_base(&nodes, &opts, "port ");
         assert_eq!(items.len(), 1);
         assert!(matches!(
             &items[0],
@@ -2453,14 +2379,12 @@ mod tests {
         ));
 
         // Empty locator (ps/lsof unavailable): the snapshot hint, no panic.
-        let (_, items) = build_others_base(
-            &nodes,
-            &contents,
-            &others,
-            &no_locator(),
-            &opts,
-            "port 3000",
-        );
+        let empty_locator = no_locator();
+        let opts_empty = BuildOptions {
+            locator: &empty_locator,
+            ..opts
+        };
+        let (_, items) = build_others_base(&nodes, &opts_empty, "port 3000");
         assert!(matches!(
             &items[0],
             DisplayItem::Hint { reason, .. } if reason == "ps/lsof unavailable"
@@ -2548,7 +2472,11 @@ mod tests {
             2000,
             None,
         );
-        let records = build_other_items(&[&node], &HashMap::new(), None, None, &others);
+        let no_contents = HashMap::new();
+        let no_ts = HashMap::new();
+        let locator = no_locator();
+        let opts = content_opts(&no_contents, &others, &no_ts, &locator, None);
+        let records = build_other_items(&[&node], &opts);
         let ssh_record = records
             .iter()
             .find(|r| {

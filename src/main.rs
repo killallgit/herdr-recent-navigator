@@ -788,6 +788,8 @@ fn run_event_loop(
             active_tab_id: ctx.tab_id.as_deref(),
             self_pane_id: ctx.self_pane_id.as_deref(),
             others: &state.others,
+            contents: &state.contents,
+            locator: &state.locator,
             agent_sort: state.agent_sort,
         };
         // Use cache key to skip rebuild when input hasn't changed
@@ -805,14 +807,7 @@ fn run_event_loop(
             let (query, items) = if state.current_category == CategoryTab::All {
                 // State records and buffer content matches in one list; a
                 // leading `.` narrows to buffer content only.
-                mru::build_others_base(
-                    &state.nodes,
-                    &state.contents,
-                    &state.others,
-                    &state.locator,
-                    &opts,
-                    &state.search_query,
-                )
+                mru::build_others_base(&state.nodes, &opts, &state.search_query)
             } else {
                 (
                     state.search_query.clone(),
