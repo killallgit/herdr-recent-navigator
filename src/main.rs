@@ -47,7 +47,10 @@ type RunInnerResult = Result<(
 fn popup_state() -> popup::PopupState {
     popup::PopupState::for_connection(
         &tracker::state_dir_or_default(),
-        std::env::var("HERDR_SOCKET_PATH").ok().as_deref(),
+        std::env::var("HERDR_SOCKET_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .as_deref(),
     )
 }
 
@@ -135,9 +138,7 @@ fn main() -> Result<()> {
 
     // ── Terminal cleanup ──
     // Release this popup's state so the next shortcut press opens, not closes.
-    if let Some(own_pane_id) = &ctx.self_pane_id
-        && let Err(e) = popup_state().release(own_pane_id)
-    {
+    if let Err(e) = popup_state().release(ctx.self_pane_id.as_deref()) {
         log::debug!("Failed to release popup state: {e}");
     }
     // Write a cleanup sequence directly so the pane overlay restores cleanly.

@@ -62,24 +62,38 @@ impl PopupState {
         let _turn = self.serialize()?;
         if let Ok(owner) = std::fs::read_to_string(&self.owner_path) {
             let closed = herdr.close(owner.trim());
-            std::fs::remove_file(&self.owner_path)?;
+            self.forget_owner()?;
             if closed {
                 return Ok(Toggled::Closed);
             }
         }
         let opened = herdr.open()?;
-        if let Some(pane_id) = &opened.pane_id {
-            std::fs::write(&self.owner_path, pane_id)?;
+        if let Some(pane_id) = &opened.pane_id
+            && let Err(e) = std::fs::write(&self.owner_path, pane_id)
+        {
+            log::error!("Failed to record popup owner {pane_id}: {e}");
         }
         Ok(Toggled::Opened(opened))
     }
 
-    pub fn release(&self, pane_id: &str) -> anyhow::Result<()> {
+    /// Clears this connection's state when `pane_id` still owns it, or
+    /// unconditionally when the popup does not know its own pane id.
+    pub fn release(&self, pane_id: Option<&str>) -> anyhow::Result<()> {
         let _turn = self.serialize()?;
-        if std::fs::read_to_string(&self.owner_path).is_ok_and(|owner| owner.trim() == pane_id) {
-            std::fs::remove_file(&self.owner_path)?;
+        let owned_by_caller = pane_id.is_none_or(|pane_id| {
+            std::fs::read_to_string(&self.owner_path).is_ok_and(|owner| owner.trim() == pane_id)
+        });
+        if owned_by_caller {
+            self.forget_owner()?;
         }
         Ok(())
+    }
+
+    fn forget_owner(&self) -> anyhow::Result<()> {
+        match std::fs::remove_file(&self.owner_path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -189,10 +203,10 @@ mod tests {
         let state = PopupState::for_connection(dir.path(), None);
         state.toggle(&FakeHerdr::opening("popup-1")).unwrap();
 
-        state.release("someone-else").unwrap();
+        state.release(Some("someone-else")).unwrap();
         assert_eq!(owner_of(&state).as_deref(), Some("popup-1"));
 
-        state.release("popup-1").unwrap();
+        state.release(Some("popup-1")).unwrap();
         assert_eq!(owner_of(&state), None);
     }
 
@@ -252,5 +266,30 @@ mod tests {
             owner_of(&state),
             herdr.open_popups.lock().unwrap().first().cloned()
         );
+    }
+
+    #[test]
+    fn release_without_a_known_pane_clears_this_connections_state() {
+        let dir = TempDir::new().unwrap();
+        let state = PopupState::for_connection(dir.path(), Some("/run/herdr-a.sock"));
+        let other = PopupState::for_connection(dir.path(), Some("/run/herdr-b.sock"));
+        state.toggle(&FakeHerdr::opening("popup-1")).unwrap();
+        other.toggle(&FakeHerdr::opening("popup-2")).unwrap();
+
+        state.release(None).unwrap();
+
+        assert_eq!(owner_of(&state), None);
+        assert_eq!(owner_of(&other).as_deref(), Some("popup-2"));
+    }
+
+    #[test]
+    fn failing_to_record_the_owner_still_reports_the_opened_popup() {
+        let dir = TempDir::new().unwrap();
+        let state = PopupState::for_connection(dir.path(), None);
+        std::fs::create_dir(&state.owner_path).unwrap();
+
+        let toggled = state.toggle(&FakeHerdr::opening("popup-1")).unwrap();
+
+        assert!(matches!(toggled, Toggled::Opened(_)));
     }
 }
