@@ -100,21 +100,12 @@ impl FocusObservation {
 }
 
 pub fn now_millis() -> u64 {
-    chrono::Utc::now().timestamp_millis() as u64
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
 }
 
-/// Record a focus event observed now, with human-readable names for logging/debugging.
-pub fn record_event_with_names(
-    kind: MruKind,
-    id: &str,
-    workspace_id: &str,
-    name: Option<String>,
-    workspace_name: Option<String>,
-) -> anyhow::Result<()> {
-    record_observation(
-        FocusObservation::new(kind, id, workspace_id, now_millis()).named(name, workspace_name),
-    )
-}
+/// An observation further behind the newest entry than any hook can plausibly
+/// lag is a wall-clock step backwards, not a delayed hook.
+const MAX_HOOK_LAG_MILLIS: u64 = 60_000;
 
 /// Persist an observation to the MRU file.
 ///
@@ -128,6 +119,7 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.focused_at));
 
     let FocusObservation {
         kind,
@@ -137,6 +129,13 @@ pub fn record_observation(observation: FocusObservation) -> anyhow::Result<()> {
         name,
         workspace_name,
     } = observation;
+
+    let newest = entries.first().map_or(0, |e| e.focused_at);
+    let observed_at = if observed_at.saturating_add(MAX_HOOK_LAG_MILLIS) < newest {
+        newest
+    } else {
+        observed_at
+    };
 
     let old = entries
         .iter()
@@ -237,6 +236,10 @@ mod tests {
     use super::*;
     use crate::test_helpers::with_temp_dir;
 
+    fn record_now(kind: MruKind, id: &str, name: Option<String>) -> anyhow::Result<()> {
+        record_observation(FocusObservation::new(kind, id, "ws-1", now_millis()).named(name, None))
+    }
+
     // ── record_event tests ──
 
     #[test]
@@ -244,7 +247,7 @@ mod tests {
         with_temp_dir(|dir| {
             let path = dir.join("mru.json");
             assert!(!path.exists(), "File should not exist before recording");
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             assert!(path.exists(), "File should exist after recording");
         });
     }
@@ -252,13 +255,13 @@ mod tests {
     #[test]
     fn test_record_event_updates_timestamp() {
         with_temp_dir(|_dir| {
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let entries = load_mru();
             assert_eq!(entries.len(), 1);
             let t1 = entries[0].focused_at;
 
             std::thread::sleep(std::time::Duration::from_millis(1));
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let entries = load_mru();
             assert_eq!(entries.len(), 1, "Duplicate should not add new entry");
             assert!(entries[0].focused_at > t1, "Timestamp should be updated");
@@ -269,8 +272,7 @@ mod tests {
     fn test_record_event_truncates_at_300() {
         with_temp_dir(|_dir| {
             for i in 0..301 {
-                record_event_with_names(MruKind::Pane, &format!("pane-{}", i), "ws-1", None, None)
-                    .unwrap();
+                record_now(MruKind::Pane, &format!("pane-{}", i), None).unwrap();
             }
             let entries = load_mru();
             assert_eq!(entries.len(), 300, "Should truncate to 300 entries");
@@ -281,10 +283,9 @@ mod tests {
     #[test]
     fn test_record_event_preserves_name_on_update() {
         with_temp_dir(|_dir| {
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", Some("MyPane".into()), None)
-                .unwrap();
+            record_now(MruKind::Pane, "pane-1", Some("MyPane".into())).unwrap();
 
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
 
             let entries = load_mru();
             assert_eq!(
@@ -369,6 +370,37 @@ mod tests {
             assert_eq!(entry.workspace_id, "ws-new");
             assert_eq!(entry.name.as_deref(), Some("Newer"));
             assert_eq!(entry.workspace_name.as_deref(), Some("NewWs"));
+        });
+    }
+
+    #[test]
+    fn test_observation_into_unsorted_file_lands_in_chronological_place() {
+        with_temp_dir(|dir| {
+            let unsorted = r#"[
+                {"kind":"Workspace","id":"B","workspace_id":"B","focused_at":1},
+                {"kind":"Workspace","id":"C","workspace_id":"C","focused_at":3},
+                {"kind":"Workspace","id":"A","workspace_id":"A","focused_at":0}
+            ]"#;
+            std::fs::write(dir.join("mru.json"), unsorted).unwrap();
+
+            record_observation(observation(MruKind::Workspace, "D", 2)).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["C", "D", "B", "A"]);
+        });
+    }
+
+    #[test]
+    fn test_observation_far_behind_newest_is_treated_as_clock_regression() {
+        with_temp_dir(|_dir| {
+            let now = 10_000_000;
+            record_observation(observation(MruKind::Workspace, "A", now - 10)).unwrap();
+            record_observation(observation(MruKind::Workspace, "B", now)).unwrap();
+            record_observation(observation(MruKind::Workspace, "A", now - 1_000_000)).unwrap();
+
+            let ids: Vec<_> = load_mru().into_iter().map(|e| e.id).collect();
+            assert_eq!(ids, ["A", "B"]);
+            assert_eq!(load_mru()[0].focused_at, now);
         });
     }
 
@@ -480,7 +512,7 @@ mod tests {
     #[test]
     fn test_record_event_atomic_write_survives_crash() {
         with_temp_dir(|dir| {
-            record_event_with_names(MruKind::Pane, "pane-1", "ws-1", None, None).unwrap();
+            record_now(MruKind::Pane, "pane-1", None).unwrap();
             let path = dir.join("mru.json");
             let content_before = std::fs::read_to_string(&path).unwrap();
 

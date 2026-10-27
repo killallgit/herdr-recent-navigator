@@ -191,6 +191,7 @@ fn run_inner(cli: &Cli) -> RunInnerResult {
 
     // Record current focus at navigator startup (single pass over nodes)
     if connected && let Some(fpi) = &focused_pane_info {
+        let observed_at = tracker::now_millis();
         let mut pane_name = if fpi.label.is_empty() {
             None
         } else {
@@ -213,30 +214,36 @@ fn run_inner(cli: &Cli) -> RunInnerResult {
             }
         }
 
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Pane,
-            &fpi.pane_id,
-            &fpi.workspace_id,
-            pane_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Pane,
+                &fpi.pane_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(pane_name, ws_name.clone()),
         ) {
             log::error!("Failed to record pane focus event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Tab,
-            &fpi.tab_id,
-            &fpi.workspace_id,
-            tab_name,
-            ws_name.clone(),
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Tab,
+                &fpi.tab_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(tab_name, ws_name.clone()),
         ) {
             log::error!("Failed to record tab focus event: {e}");
         }
-        if let Err(e) = tracker::record_event_with_names(
-            tracker::MruKind::Workspace,
-            &fpi.workspace_id,
-            &fpi.workspace_id,
-            ws_name,
-            None,
+        if let Err(e) = tracker::record_observation(
+            tracker::FocusObservation::new(
+                tracker::MruKind::Workspace,
+                &fpi.workspace_id,
+                &fpi.workspace_id,
+                observed_at,
+            )
+            .named(ws_name, None),
         ) {
             log::error!("Failed to record workspace focus event: {e}");
         }
